@@ -7,3 +7,4 @@ asyncache
 cachetools
 cytoolz
 pydantic
+yarl
