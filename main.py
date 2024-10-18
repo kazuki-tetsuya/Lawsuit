@@ -57,10 +57,8 @@ import orjson
 from asyncache import cached
 from cachetools import TTLCache
 from cytoolz import curry
-from interactions import ExtensionUnload, Forbidden, HTTPException
 from interactions.api.events import ExtensionUnload, MessageCreate, NewThreadCreate
-from interactions.bot.errors import Forbidden, HTTPException, NotFound
-from interactions.models.discord.channel import DMChannel
+from interactions.client.errors import Forbidden, HTTPException, NotFound
 from pydantic import BaseModel, Field, ValidationError, root_validator, validator
 from pydantic.fields import PrivateAttr
 
@@ -994,7 +992,7 @@ class Lawsuit(interactions.Extension):
 
         coro = (
             self.handle_direct_message_evidence(message)
-            if isinstance(message.channel, DMChannel)
+            if isinstance(message.channel, interactions.DMChannel)
             else self.handle_channel_message(message)
         )
         asyncio.create_task(coro)
