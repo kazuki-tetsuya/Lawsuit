@@ -1,0 +1,9 @@
+aiohttp
+bleach
+discord-py-interactions
+lmdb
+orjson
+asyncache
+cachetools
+cytoolz
+pydantic
