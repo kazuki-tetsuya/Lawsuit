@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import functools
 import io
 import logging
@@ -28,7 +27,6 @@ from typing import (
     AsyncIterator,
     Awaitable,
     Callable,
-    ClassVar,
     Dict,
     Final,
     FrozenSet,
@@ -61,16 +59,19 @@ from interactions.api.events import ExtensionUnload, MessageCreate, NewThreadCre
 from interactions.client.errors import Forbidden, HTTPException, NotFound
 from pydantic import BaseModel, Field, ValidationError, model_validator, validator
 from pydantic.fields import PrivateAttr
+from yarl import URL
 
-LOG_DIR: Final[str] = os.path.join(os.path.dirname(__file__), "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-LOG_FILE: Final[str] = os.path.join(LOG_DIR, "lawsuit.log")
+BASE_DIR: Final[URL] = URL(os.path.dirname(__file__))
+LOG_FILE: Final[str] = str(BASE_DIR / "lawsuit.log")
+
 logger: Final[logging.Logger] = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
 file_handler: Final[RotatingFileHandler] = RotatingFileHandler(
     LOG_FILE, maxBytes=1 * 1024 * 1024, backupCount=1
 )
 file_handler.setLevel(logging.DEBUG)
+
 formatter: Final[logging.Formatter] = logging.Formatter(
     "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -368,22 +369,24 @@ class Store:
 
     def _open_db(self: T) -> None:
         try:
-            self.env = cast(
-                LMDB,
-                lmdb.open(
-                    "cases.lmdb",
-                    map_size=1 * 1024 * 1024,
-                    max_dbs=1,
-                    subdir=True,
-                    readonly=False,
-                    lock=True,
-                    readahead=False,
-                    meminit=False,
-                    max_readers=126,
-                    sync=True,
-                    map_async=True,
-                    mode=0o600,
-                ),
+            db_path = BASE_DIR / "cases.lmdb"
+            self.env = lmdb.open(
+                str(db_path),
+                map_size=1 * 1024 * 1024,
+                max_dbs=1,
+                subdir=True,
+                readonly=False,
+                lock=True,
+                readahead=False,
+                meminit=False,
+                max_readers=126,
+                sync=True,
+                map_async=True,
+                mode=0o600,
+                create=True,
+                writemap=True,
+                metasync=False,
+                max_spare_txns=2,
             )
         except lmdb.Error as e:
             raise RuntimeError(f"Failed to open database: {e}") from e
