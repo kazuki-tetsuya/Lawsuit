@@ -57,12 +57,18 @@ from cachetools import TTLCache
 from cytoolz import curry
 from interactions.api.events import ExtensionUnload, MessageCreate, NewThreadCreate
 from interactions.client.errors import Forbidden, HTTPException, NotFound
-from pydantic import BaseModel, Field, ValidationError, model_validator, validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+    validator,
+)
 from pydantic.fields import PrivateAttr
-from yarl import URL
 
-BASE_DIR: Final[URL] = URL(os.path.dirname(__file__))
-LOG_FILE: Final[str] = str(BASE_DIR / "lawsuit.log")
+BASE_DIR: Final[str] = os.path.dirname(__file__)
+LOG_FILE: Final[str] = os.path.join(BASE_DIR, "lawsuit.log")
 
 logger: Final[logging.Logger] = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -197,8 +203,7 @@ class Evidence(BaseModel):
     )
 
     class Config:
-        frozen = True
-        allow_mutation = False
+        model_config = ConfigDict(frozen=True)
 
     @validator("state")
     def validate_state(cls, v: EvidenceAction) -> EvidenceAction:
@@ -264,8 +269,7 @@ class Data(BaseModel):
             CaseStatus: lambda v: v.value,
             FrozenSet: lambda v: list(v),
         }
-        frozen = True
-        allow_mutation = False
+        model_config = ConfigDict(frozen=True)
 
     def __init__(self, **data: Any) -> None:
         super().__init__(**data)
@@ -369,12 +373,12 @@ class Store:
 
     def _open_db(self: T) -> None:
         try:
-            db_path = BASE_DIR / "cases.lmdb"
+            db_path = os.path.join(BASE_DIR, "cases.lmdb")
             self.env = lmdb.open(
                 str(db_path),
                 map_size=1 * 1024 * 1024,
                 max_dbs=1,
-                subdir=True,
+                subdir=False,
                 readonly=False,
                 lock=True,
                 readahead=False,
@@ -1132,18 +1136,16 @@ class Lawsuit(interactions.Extension):
         except Exception as e:
             logger.error(f"Error fetching cases: {e}", exc_info=True)
 
-    async def process_task_queue(self) -> None:
+    async def process_task_queue(self):
         while not self.shutdown_event.is_set():
             try:
-                task = await asyncio.wait_for(self.case_task_queue.get(), timeout=1)
+                task = await asyncio.wait_for(self.case_task_queue.get(), timeout=1.0)
                 await task()
+                self.case_task_queue.task_done()
             except asyncio.TimeoutError:
                 continue
-            except asyncio.CancelledError:
-                break
             except Exception as e:
                 logger.error(f"Error processing task: {e}", exc_info=True)
-            finally:
                 self.case_task_queue.task_done()
 
     async def periodic_consistency_check(self) -> None:
