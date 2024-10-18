@@ -101,30 +101,21 @@ class Config:
     _instance: ClassVar[Optional[Config]] = None
 
     def __post_init__(self) -> None:
-        if self.__class__._instance is not None:
+        if Config._instance is not None:
             raise RuntimeError(
                 "Config instance already exists. Use get_instance() to access it."
             )
-        object.__setattr__(self.__class__, "_instance", self)
+        Config._instance = self
 
     @classmethod
-    @lru_cache(maxsize=None)
-    def get_instance(cls: Type[T]) -> T:
+    def get_instance(cls) -> Config:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
     def __getattribute__(self, name: str) -> Any:
         value = super().__getattribute__(name)
-        if name in {
-            "GUILD_ID",
-            "JUDGE_ROLE_ID",
-            "PLAINTIFF_ROLE_ID",
-            "COURTROOM_CHANNEL_ID",
-            "MAX_JUDGES_PER_CASE",
-            "MAX_JUDGES_PER_APPEAL",
-            "MAX_FILE_SIZE",
-        }:
+        if name.isupper() or name.startswith("_"):
             return value
         elif isinstance(value, (tuple, frozenset)):
             return copy.deepcopy(value)
