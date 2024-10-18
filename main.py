@@ -59,13 +59,7 @@ from cachetools import TTLCache
 from cytoolz import curry
 from interactions.api.events import ExtensionUnload, MessageCreate, NewThreadCreate
 from interactions.client.errors import Forbidden, HTTPException, NotFound
-from pydantic import (
-    BaseModel,
-    Field,
-    ValidationError,
-    model_validator,
-    validator,
-)
+from pydantic import BaseModel, Field, ValidationError, model_validator, validator
 from pydantic.fields import PrivateAttr
 
 LOG_DIR: Final[str] = os.path.join(os.path.dirname(__file__), "logs")
@@ -122,11 +116,19 @@ class Config:
 
     def __getattribute__(self, name: str) -> Any:
         value = super().__getattribute__(name)
-        return (
-            value
-            if name.startswith("_") or isinstance(value, (int, str, tuple, frozenset))
-            else copy.deepcopy(value)
-        )
+        if name in {
+            "GUILD_ID",
+            "JUDGE_ROLE_ID",
+            "PLAINTIFF_ROLE_ID",
+            "COURTROOM_CHANNEL_ID",
+            "MAX_JUDGES_PER_CASE",
+            "MAX_JUDGES_PER_APPEAL",
+            "MAX_FILE_SIZE",
+        }:
+            return value
+        elif isinstance(value, (tuple, frozenset)):
+            return copy.deepcopy(value)
+        return value
 
 
 @final
@@ -988,14 +990,14 @@ class Lawsuit(interactions.Extension):
             )
 
     @interactions.listen(MessageCreate)
-    async def on_message_create(self, message: interactions.Message) -> None:
-        if message.author.id == self.bot.user.id:
+    async def on_message_create(self, event: MessageCreate) -> None:
+        if event.message.author.id == self.bot.user.id:
             return
 
         coro = (
-            self.handle_direct_message_evidence(message)
-            if isinstance(message.channel, interactions.DMChannel)
-            else self.handle_channel_message(message)
+            self.handle_direct_message_evidence(event.message)
+            if isinstance(event.message.channel, interactions.DMChannel)
+            else self.handle_channel_message(event.message)
         )
         asyncio.create_task(coro)
 
