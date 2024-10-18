@@ -98,28 +98,6 @@ class Config:
             {"image/jpeg", "image/png", "application/pdf", "text/plain"}
         )
     )
-    _instance: ClassVar[Optional[Config]] = None
-
-    def __post_init__(self) -> None:
-        if Config._instance is not None:
-            raise RuntimeError(
-                "Config instance already exists. Use get_instance() to access it."
-            )
-        Config._instance = self
-
-    @classmethod
-    def get_instance(cls) -> Config:
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    def __getattribute__(self, name: str) -> Any:
-        value = super().__getattribute__(name)
-        if name.isupper() or name.startswith("_"):
-            return value
-        elif isinstance(value, (tuple, frozenset)):
-            return copy.deepcopy(value)
-        return value
 
 
 @final
@@ -940,7 +918,7 @@ class View:
 class Lawsuit(interactions.Extension):
     def __init__(self, bot: interactions.Client):
         self.bot: Final[interactions.Client] = bot
-        self.config: Final[Config] = Config.get_instance()
+        self.config: Final[Config] = Config()
         self.store: Final[Store] = Store(self.config)
         self.repository: Final[Repository] = Repository(self.config, self.store)
         self.view: Final[View] = View(bot, self.config)
