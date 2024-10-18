@@ -59,7 +59,13 @@ from cachetools import TTLCache
 from cytoolz import curry
 from interactions.api.events import ExtensionUnload, MessageCreate, NewThreadCreate
 from interactions.client.errors import Forbidden, HTTPException, NotFound
-from pydantic import BaseModel, Field, ValidationError, root_validator, validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    model_validator,
+    validator,
+)
 from pydantic.fields import PrivateAttr
 
 LOG_DIR: Final[str] = os.path.join(os.path.dirname(__file__), "logs")
@@ -338,11 +344,9 @@ class Data(BaseModel):
     def validate_evidence_queue(cls, v: Any) -> Tuple[Evidence, ...]:
         return tuple(Evidence(**item) if isinstance(item, dict) else item for item in v)
 
-    @root_validator
-    def check_thread_ids(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        thread_id, trial_thread_id = values.get("thread_id"), values.get(
-            "trial_thread_id"
-        )
+    @model_validator(mode="after")
+    def check_thread_ids(cls, values):
+        thread_id, trial_thread_id = values.thread_id, values.trial_thread_id
         if (
             thread_id is not None
             and trial_thread_id is not None
@@ -351,11 +355,9 @@ class Data(BaseModel):
             raise ValueError("thread_id and trial_thread_id must be different")
         return values
 
-    @root_validator
-    def check_plaintiff_defendant(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        plaintiff_id, defendant_id = values.get("plaintiff_id"), values.get(
-            "defendant_id"
-        )
+    @model_validator(mode="after")
+    def check_plaintiff_defendant(cls, values):
+        plaintiff_id, defendant_id = values.plaintiff_id, values.defendant_id
         if (
             plaintiff_id is not None
             and defendant_id is not None
