@@ -499,7 +499,8 @@ class Repository(Generic[T]):
             await asyncio.wait_for(lock.acquire(), timeout=5.0)
             yield
         finally:
-            lock.release()
+            if lock.locked():
+                lock.release()
 
     @async_retry()
     async def get_case(self, case_id: str) -> Optional[T]:
@@ -518,13 +519,13 @@ class Repository(Generic[T]):
             logger.error(f"Error retrieving case {case_id}: {str(e)}")
             return None
 
-    @async_retry()
+    @async_retry(max_retries=3, delay=0.5)
     async def persist_case(self, case_id: str, case: T) -> None:
         async with self.case_lock(case_id):
             self.current_cases[case_id] = case
             await self.case_store.upsert_case(case_id, case.dict())
 
-    @async_retry()
+    @async_retry(max_retries=3, delay=0.5)
     async def update_case(self, case_id: str, **kwargs: Any) -> None:
         async with self.case_lock(case_id):
             if case := await self.get_case(case_id):
@@ -750,7 +751,7 @@ class View:
             ("Facts", case.facts or "None"),
         ]
 
-        embed = await self.view.create_embed(f"Case #{case_id}")
+        embed = await self.create_embed(f"Case #{case_id}")
         for name, value in fields:
             embed.add_field(name=name, value=value or "None", inline=False)
 
@@ -974,12 +975,13 @@ class Lawsuit(interactions.Extension):
 
     @interactions.listen()
     async def on_component(self, component: interactions.ComponentContext) -> None:
-        try:
-            custom_id = component.data.custom_id
-        except AttributeError:
+        if not hasattr(component, "custom_id"):
             logger.warning(f"Component lacks custom_id: {component}")
             return
 
+        await component.defer()
+
+        custom_id = component.custom_id
         action, *args = custom_id.partition("_")[::2]
 
         handler = self.ACTION_MAP.get(action)
@@ -1071,18 +1073,7 @@ class Lawsuit(interactions.Extension):
                 return
 
             defendant_id = is_valid_defendant[1]
-            if not (
-                case_data := await self.create_new_case(
-                    ctx, sanitized_data, defendant_id
-                )
-            ):
-                await self.view.send_error(
-                    ctx,
-                    "An error occurred while creating the case. Please try again later.",
-                )
-                return
-
-            case_id, case = case_data
+            case_id, case = await self.create_new_case(ctx, sanitized_data, defendant_id)
             if case_id is None or case is None:
                 await self.view.send_error(
                     ctx,
@@ -1090,7 +1081,8 @@ class Lawsuit(interactions.Extension):
                 )
                 return
 
-            if not await self.setup_mediation_thread(case_id, case):
+            success = await self.setup_mediation_thread(case_id, case)
+            if not success:
                 await self.repository.delete_case(case_id)
                 await self.view.send_error(
                     ctx,
@@ -1098,17 +1090,21 @@ class Lawsuit(interactions.Extension):
                 )
                 return
 
-            await asyncio.gather(
-                self.view.send_success(ctx, f"第{case_id}号调解室创建成功"),
-                self.notify_judges(case_id, ctx.guild_id),
-            )
+            try:
+                await self.view.send_success(ctx, f"第{case_id}号调解室创建成功")
+            except interactions.client.errors.NotFound:
+                logger.warning("Interaction not found when trying to send success message.")
+
+            await self.notify_judges(case_id, ctx.guild_id)
+
         except Exception as e:
-            logger.error(
-                f"Unhandled exception in handle_lawsuit_form: {str(e)}", exc_info=True
-            )
-            await self.view.send_error(
-                ctx, "An unexpected error occurred. Please try again later."
-            )
+            logger.error(f"Error in handle_lawsuit_form: {str(e)}", exc_info=True)
+            try:
+                await self.view.send_error(
+                    ctx, "An unexpected error occurred. Please try again later."
+                )
+            except interactions.client.errors.NotFound:
+                logger.warning("Interaction not found when trying to send error message.")
 
     # Task functions
 
@@ -1502,8 +1498,11 @@ class Lawsuit(interactions.Extension):
     async def _add_member_to_thread(
         thread: interactions.GuildText, member_id: int
     ) -> None:
-        user = await Lawsuit.bot.fetch_user(member_id)
-        await thread.add_member(user)
+        try:
+            user = await thread.guild.fetch_member(member_id)
+            await thread.add_member(user)
+        except Exception as e:
+            logger.error(f"Failed to add user {member_id} to thread: {str(e)}")
 
     async def add_participants_to_thread(
         self, thread: interactions.GuildText, case: Data
@@ -1765,8 +1764,15 @@ class Lawsuit(interactions.Extension):
         self, user_ids: Iterable[int], notification_func: Callable
     ) -> None:
         async def notify(user_id: int) -> None:
-            with suppress(Exception):
+            try:
                 await notification_func(user_id)
+            except HTTPException as e:
+                if e.status == 403:
+                    logger.warning(f"Cannot send DM to user {user_id}: {str(e)}")
+                else:
+                    logger.error(f"Failed to notify user {user_id}: {str(e)}")
+            except Exception as e:
+                logger.error(f"Unexpected error notifying user {user_id}: {str(e)}")
 
         await asyncio.gather(*(notify(user_id) for user_id in user_ids))
 
@@ -2248,10 +2254,15 @@ class Lawsuit(interactions.Extension):
             thread = await self.create_mediation_thread(channel, case_id)
             await self.send_case_summary(thread, case_id, case)
             await self.update_case_with_thread(case_id, thread.id)
-            await self.add_participants_to_thread(thread, case)
+
+            guild = await self.bot.fetch_guild(self.config.GUILD_ID)
+            judges = await self.get_judges(guild)
+            participants = {case.plaintiff_id, case.defendant_id, *judges}
+
+            await self.add_members_to_thread(thread, participants)
             return True
         except Exception as e:
-            logger.error(f"Failed to create mediation thread: {str(e)}")
+            logger.error(f"Failed to create mediation thread: {str(e)}", exc_info=True)
             return False
 
     async def send_case_summary(
@@ -2400,11 +2411,16 @@ class Lawsuit(interactions.Extension):
 
     @lru_cache(maxsize=1)
     async def get_judges(self, guild: interactions.Guild) -> Set[int]:
-        return {
-            member.id
-            for member in guild.members
-            if self.config.JUDGE_ROLE_ID in member.role_ids
-        }
+        judge_role = guild.get_role(self.config.JUDGE_ROLE_ID)
+        if not judge_role:
+            logger.warning(f"Judge role with ID {self.config.JUDGE_ROLE_ID} not found.")
+            return set()
+
+        judges = set()
+        async for member in guild.fetch_members():
+            if self.config.JUDGE_ROLE_ID in member._role_ids:
+                judges.add(member.id)
+        return judges
 
     async def get_courtroom_channel(self) -> interactions.GuildText:
         channel = await self.bot.fetch_channel(self.config.COURTROOM_CHANNEL_ID)
