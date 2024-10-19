@@ -65,7 +65,6 @@ from pydantic import (
     model_validator,
     validator,
 )
-from pydantic.fields import PrivateAttr
 
 BASE_DIR: Final[str] = os.path.dirname(__file__)
 LOG_FILE: Final[str] = os.path.join(BASE_DIR, "lawsuit.log")
@@ -128,13 +127,13 @@ class EmbedColor(IntEnum):
 
 @final
 class CaseRole(Enum):
-    PROSECUTOR = "公诉人"
-    PRIVATE_PROSECUTOR = "自诉人"
-    PLAINTIFF = "原告人"
-    AGENT = "代理人"
-    DEFENDANT = "被告人"
-    DEFENDER = "辩护人"
-    WITNESS = "证人"
+    PROSECUTOR = "Prosecutor"
+    PRIVATE_PROSECUTOR = "Private Prosecutor"
+    PLAINTIFF = "Plaintiff"
+    AGENT = "Agent"
+    DEFENDANT = "Defendant"
+    DEFENDER = "Defender"
+    WITNESS = "Witness"
 
 
 @final
@@ -165,11 +164,11 @@ class CaseAction(Enum):
     @cached_property
     def display_name(self) -> str:
         return {
-            CaseAction.FILE: "立案",
-            CaseAction.CLOSE: "结案",
-            CaseAction.WITHDRAW: "撤诉",
-            CaseAction.ACCEPT: "受理",
-            CaseAction.DISMISS: "驳回",
+            CaseAction.FILE: "File",
+            CaseAction.CLOSE: "Close",
+            CaseAction.WITHDRAW: "Withdraw",
+            CaseAction.ACCEPT: "Accept",
+            CaseAction.DISMISS: "Dismiss",
         }[self]
 
     @cached_property
@@ -202,8 +201,7 @@ class Evidence(BaseModel):
         default=EvidenceAction.PENDING, description="Current state of the evidence"
     )
 
-    class Config:
-        model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     @validator("state")
     def validate_state(cls, v: EvidenceAction) -> EvidenceAction:
@@ -260,23 +258,16 @@ class Data(BaseModel):
     )
 
     WHITESPACE_REGEX: Final[re.Pattern] = re.compile(r"\s+")
-    _hash: int = PrivateAttr()
 
-    class Config:
-        validate_assignment = True
-        json_encoders = {
+    model_config = ConfigDict(
+        validate_assignment=True,
+        json_encoders={
             datetime: lambda v: v.isoformat(),
             CaseStatus: lambda v: v.value,
             FrozenSet: lambda v: list(v),
-        }
-        model_config = ConfigDict(frozen=True)
-
-    def __init__(self, **data: Any) -> None:
-        super().__init__(**data)
-        object.__setattr__(self, "_hash", hash(frozenset(self.__dict__.items())))
-
-    def __hash__(self) -> int:
-        return self._hash
+        },
+        frozen=True,
+    )
 
     @validator(
         "plaintiff_id",
@@ -545,10 +536,13 @@ class Repository(Generic[T]):
     @async_retry()
     async def delete_case(self, case_id: str) -> None:
         async with self.case_lock(case_id):
-            await self.case_store.delete_case(case_id)
-            self.current_cases.pop(case_id, None)
-            async with self._global_lock:
-                self._case_locks.pop(case_id, None)
+            try:
+                await self.case_store.delete_case(case_id)
+                self.current_cases.pop(case_id, None)
+                async with self._global_lock:
+                    self._case_locks.pop(case_id, None)
+            except Exception as e:
+                logger.error(f"Error deleting case {case_id}: {str(e)}", exc_info=True)
 
     @async_retry()
     async def get_all_cases(self) -> Dict[str, T]:
@@ -704,9 +698,9 @@ class View:
             (
                 "accusation",
                 "Reason for Appeal" if is_appeal else "Accusation",
-                "Enter the reason for appeal" if is_appeal else "刑法条文",
+                "Enter the reason for appeal" if is_appeal else "Law article",
             ),
-            ("facts", "事实", "Describe the relevant facts"),
+            ("facts", "Facts", "Describe the relevant facts"),
         )
         return tuple(
             (
@@ -727,17 +721,16 @@ class View:
             for field in fields
         )
 
-    @lru_cache(maxsize=1)
     def create_action_buttons(self) -> Tuple[interactions.Button, ...]:
         return (
             interactions.Button(
                 style=interactions.ButtonStyle.PRIMARY,
-                label="提起诉讼",
+                label="File Lawsuit",
                 custom_id="initiate_lawsuit_button",
             ),
             interactions.Button(
                 style=interactions.ButtonStyle.SECONDARY,
-                label="提起上诉",
+                label="File Appeal",
                 custom_id="initiate_appeal_button",
             ),
         )
@@ -745,46 +738,43 @@ class View:
     async def create_case_summary_embed(
         self, case_id: str, case: Data
     ) -> interactions.Embed:
-        fields = (
-            ("主审法官", " ".join(f"<@{judge_id}>" for judge_id in case.judges)),
-            ("原告", f"<@{case.plaintiff_id}>"),
-            ("被告", f"<@{case.defendant_id}>"),
-            ("指控", case.accusation),
-            ("事实", case.facts),
-        )
+        fields = [
+            (
+                "Presiding Judge",
+                " ".join(f"<@{judge_id}>" for judge_id in case.judges)
+                or "Not yet assigned",
+            ),
+            ("Plaintiff", f"<@{case.plaintiff_id}>"),
+            ("Defendant", f"<@{case.defendant_id}>"),
+            ("Accusation", case.accusation or "None"),
+            ("Facts", case.facts or "None"),
+        ]
 
-        embed = await self.create_embed(f"第{case_id}号案")
+        embed = await self.view.create_embed(f"Case #{case_id}")
         for name, value in fields:
-            embed.add_field(name=name, value=value, inline=False)
+            embed.add_field(name=name, value=value or "None", inline=False)
 
         return embed
 
-    def create_case_action_buttons(
-        self, case_id: str
-    ) -> Tuple[interactions.Button, ...]:
-        cache_key = f"case_action_{case_id}"
-        if cache_key in self.button_cache:
-            return tuple(self.button_cache[cache_key])
-
-        buttons = (
+    def create_case_action_buttons(self, case_id: str) -> List[interactions.ActionRow]:
+        buttons = [
             interactions.Button(
                 style=interactions.ButtonStyle.DANGER,
-                label="驳回",
+                label="Dismiss",
                 custom_id=f"dismiss_{case_id}",
             ),
             interactions.Button(
                 style=interactions.ButtonStyle.SUCCESS,
-                label="立案",
+                label="Accept",
                 custom_id=f"accept_{case_id}",
             ),
             interactions.Button(
                 style=interactions.ButtonStyle.SECONDARY,
-                label="撤诉",
+                label="Withdraw",
                 custom_id=f"withdraw_{case_id}",
             ),
-        )
-        self.button_cache[cache_key] = buttons
-        return buttons
+        ]
+        return [interactions.ActionRow(*buttons)]
 
     def create_trial_privacy_buttons(
         self, case_id: str
@@ -796,12 +786,12 @@ class View:
         buttons = (
             interactions.Button(
                 style=interactions.ButtonStyle.SUCCESS,
-                label="是",
+                label="Yes",
                 custom_id=f"public_trial_yes_{case_id}",
             ),
             interactions.Button(
                 style=interactions.ButtonStyle.DANGER,
-                label="否",
+                label="No",
                 custom_id=f"public_trial_no_{case_id}",
             ),
         )
@@ -812,7 +802,7 @@ class View:
     def create_end_trial_button(self, case_id: str) -> interactions.Button:
         return interactions.Button(
             style=interactions.ButtonStyle.DANGER,
-            label="结案",
+            label="End Trial",
             custom_id=f"end_trial_{case_id}",
         )
 
@@ -821,8 +811,8 @@ class View:
         self, user_id: int
     ) -> Tuple[interactions.Button, ...]:
         actions = (
-            ("禁言", "mute", interactions.ButtonStyle.PRIMARY),
-            ("解禁", "unmute", interactions.ButtonStyle.SUCCESS),
+            ("Mute", "mute", interactions.ButtonStyle.PRIMARY),
+            ("Unmute", "unmute", interactions.ButtonStyle.SUCCESS),
         )
         return tuple(
             interactions.Button(
@@ -838,12 +828,12 @@ class View:
         return (
             interactions.Button(
                 style=interactions.ButtonStyle.PRIMARY,
-                label="标记",
+                label="Pin",
                 custom_id=f"pin_{message_id}",
             ),
             interactions.Button(
                 style=interactions.ButtonStyle.DANGER,
-                label="删除",
+                label="Delete",
                 custom_id=f"delete_{message_id}",
             ),
         )
@@ -876,8 +866,9 @@ class View:
     def get_proverb_selector() -> Callable[[date], str]:
         proverb_count = len(View.PROVERBS)
         random.seed(0)
-        shuffled_indices = tuple(range(proverb_count))
+        shuffled_indices = list(range(proverb_count))
         random.shuffle(shuffled_indices)
+        shuffled_indices = tuple(shuffled_indices)
 
         def select_proverb(current_date: date) -> str:
             index = shuffled_indices[current_date.toordinal() % proverb_count]
@@ -917,6 +908,10 @@ class View:
                 self.embed_cache,
             )
         )
+
+
+async def is_judge(ctx: interactions.BaseContext) -> bool:
+    return ctx.author.has_role(Config().JUDGE_ROLE_ID)
 
 
 # Controller
@@ -979,7 +974,12 @@ class Lawsuit(interactions.Extension):
 
     @interactions.listen()
     async def on_component(self, component: interactions.ComponentContext) -> None:
-        custom_id = component.custom_id
+        try:
+            custom_id = component.data.custom_id
+        except AttributeError:
+            logger.warning(f"Component lacks custom_id: {component}")
+            return
+
         action, *args = custom_id.partition("_")[::2]
 
         handler = self.ACTION_MAP.get(action)
@@ -1083,6 +1083,13 @@ class Lawsuit(interactions.Extension):
                 return
 
             case_id, case = case_data
+            if case_id is None or case is None:
+                await self.view.send_error(
+                    ctx,
+                    "An error occurred while creating the case. Please try again later.",
+                )
+                return
+
             if not await self.setup_mediation_thread(case_id, case):
                 await self.repository.delete_case(case_id)
                 await self.view.send_error(
@@ -1226,11 +1233,7 @@ class Lawsuit(interactions.Extension):
     @module_base.subcommand(
         "memory", sub_cmd_description="Print top memory allocations"
     )
-    @interactions.check(
-        lambda ctx: any(
-            role.id == Config.get_instance().JUDGE_ROLE_ID for role in ctx.author.roles
-        )
-    )
+    @interactions.check(is_judge)
     async def display_memory_allocations(self, ctx: interactions.SlashContext) -> None:
         snapshot = tracemalloc.take_snapshot()
         top_stats = snapshot.statistics("lineno")[:10]
@@ -1246,11 +1249,7 @@ class Lawsuit(interactions.Extension):
     @module_base.subcommand(
         "consistency", sub_cmd_description="Perform a data consistency check"
     )
-    @interactions.check(
-        lambda ctx: any(
-            role.id == Config.get_instance().JUDGE_ROLE_ID for role in ctx.author.roles
-        )
-    )
+    @interactions.check(is_judge)
     async def verify_consistency_command(
         self, ctx: Optional[interactions.SlashContext] = None
     ) -> None:
@@ -1278,14 +1277,11 @@ class Lawsuit(interactions.Extension):
         )
 
     @module_base.subcommand(
-        "send", sub_cmd_description="Send lawsuit and appeal buttons"
+        "dispatch",
+        sub_cmd_description="Dispatch the lawsuit button to the specified channel",
     )
-    @interactions.check(
-        lambda ctx: any(
-            role.id == Config.get_instance().JUDGE_ROLE_ID for role in ctx.author.roles
-        )
-    )
-    async def dispatch_lawsuit_button(self, ctx: interactions.CommandContext) -> None:
+    @interactions.check(is_judge)
+    async def dispatch_lawsuit_button(self, ctx: interactions.SlashContext) -> None:
         logger.info(f"Attempting to send sue button by user {ctx.author.id}")
 
         try:
@@ -1294,7 +1290,10 @@ class Lawsuit(interactions.Extension):
             embed = await self.view.create_embed(
                 daily_proverb, "Click the button to file a lawsuit or appeal."
             )
-            message = await ctx.channel.send(embeds=[embed], components=components)
+
+            action_row = interactions.ActionRow(*components)
+
+            message = await ctx.channel.send(embeds=[embed], components=[action_row])
 
             self.lawsuit_button_message_id = message.id
             await self.initialize_chat_thread(ctx)
@@ -1314,8 +1313,12 @@ class Lawsuit(interactions.Extension):
         opt_type=interactions.OptionType.STRING,
         required=True,
         choices=[
-            interactions.SlashCommandChoice(name="分配", value=UserAction.ASSIGN.value),
-            interactions.SlashCommandChoice(name="撤销", value=UserAction.REVOKE.value),
+            interactions.SlashCommandChoice(
+                name="Assign", value=UserAction.ASSIGN.value
+            ),
+            interactions.SlashCommandChoice(
+                name="Revoke", value=UserAction.REVOKE.value
+            ),
         ],
     )
     @interactions.slash_option(
@@ -1471,7 +1474,7 @@ class Lawsuit(interactions.Extension):
             await self.view.send_error(ctx, "Insufficient permissions.")
             return
 
-        embed = await self.view.create_embed("是否公开审理")
+        embed = await self.view.create_embed("Public or Private Trial")
         buttons = self.view.create_trial_privacy_buttons(case_id)
         await ctx.send(embeds=[embed], components=[interactions.ActionRow(*buttons)])
 
@@ -1527,10 +1530,14 @@ class Lawsuit(interactions.Extension):
                     new_judges = case.judges + (ctx.author.id,)
                     await self.repository.update_case(case_id, judges=new_judges)
 
-            notification = f"{ctx.author.display_name}以法官身份参与第{case_id}号案。"
+            notification = (
+                f"{ctx.author.display_name} has joined Case #{case_id} as a judge."
+            )
 
             await asyncio.gather(
-                self.view.send_success(ctx, f"您以法官身份参与第{case_id}号案。"),
+                self.view.send_success(
+                    ctx, f"You have joined Case #{case_id} as a judge."
+                ),
                 self.notify_case_participants(case_id, notification),
             )
         except Exception as e:
@@ -1729,11 +1736,11 @@ class Lawsuit(interactions.Extension):
             notify_judges_button = interactions.Button(
                 custom_id=f"file_{case_id}",
                 style=interactions.ButtonStyle.PRIMARY,
-                label="参与调解",
+                label="Join Mediation",
             )
             notification_embed = await self.view.create_embed(
-                f"本院收悉第{case_id}号案诉状",
-                f"请前往[调解室]({thread_link})参与调解。",
+                f"Case #{case_id} Complaint Received",
+                f"Please proceed to the [mediation room]({thread_link}) to participate in mediation.",
             )
 
             await self._notify_users(
@@ -2178,7 +2185,7 @@ class Lawsuit(interactions.Extension):
             tags=ALLOWED_TAGS,
             attributes=ALLOWED_ATTRIBUTES,
             strip=True,
-            filters=[bleach.sanitizer.ALLOWED_PROTOCOLS.__contains__],
+            protocols=bleach.ALLOWED_PROTOCOLS,
         )
 
         return WHITESPACE_PATTERN.sub(" ", cleaner(text)).strip()[:max_length]
@@ -2213,10 +2220,27 @@ class Lawsuit(interactions.Extension):
 
             thread = await self.get_or_create_chat_thread(channel)
             embed = await self.create_chat_room_setup_embed(thread)
-            await self.view.send_success(ctx, embed.description)
+
+            try:
+                await self.view.send_success(ctx, embed.description)
+            except NotFound:
+                logger.warning("Interaction not found, possibly due to timeout.")
+                try:
+                    await ctx.send(embed=embed, ephemeral=True)
+                except Exception as e:
+                    logger.error(f"Failed to send follow-up message: {str(e)}")
+
         except Exception as e:
-            logger.error(f"Chat thread initialization error: {str(e)}")
-            await self.view.send_error(ctx, f"An error occurred: {str(e)}")
+            logger.error(f"Chat thread initialization error: {str(e)}", exc_info=True)
+            try:
+                await self.view.send_error(
+                    ctx,
+                    "An error occurred while setting up the chat thread. Please try again later.",
+                )
+            except interactions.client.errors.NotFound:
+                logger.warning(
+                    "Interaction not found when trying to send error message."
+                )
 
     async def setup_mediation_thread(self, case_id: str, case: Data) -> bool:
         try:
@@ -2264,7 +2288,7 @@ class Lawsuit(interactions.Extension):
             await self.repository.persist_case(case_id, case)
             return case_id, case
         except Exception as e:
-            logger.error(f"Error creating new case: {str(e)}")
+            logger.error(f"Error creating new case: {str(e)}", exc_info=True)
             return None, None
 
     def create_case_data(
@@ -2276,12 +2300,12 @@ class Lawsuit(interactions.Extension):
             accusation=data.get("accusation", ""),
             facts=data.get("facts", ""),
             status=CaseStatus.FILED,
-            judges=[],
+            judges=frozenset(),
         )
 
     async def create_new_chat_thread(
         self, channel: interactions.GuildText
-    ) -> interactions.GuildText:
+    ) -> interactions.ThreadChannel:
         thread = await channel.create_public_thread(
             name="聊天室", auto_archive_duration=10080
         )
@@ -2289,12 +2313,15 @@ class Lawsuit(interactions.Extension):
         return thread
 
     async def create_chat_room_setup_embed(
-        self, thread: interactions.GuildText
+        self, thread: interactions.ThreadChannel
     ) -> interactions.Embed:
+        guild_id = thread.guild.id
+        channel_id = thread.parent_id
+        thread_id = thread.id
+        jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{thread_id}"
         return await self.view.create_embed(
-            "Chat Room Setup",
-            f"The lawsuit and appeal buttons have been sent to this channel. "
-            f"The chat room thread is ready: {thread.jump_url}",
+            "Success",
+            f"The lawsuit and appeal buttons have been sent to this channel. The chat room thread is ready: {jump_url}",
         )
 
     async def create_trial_thread(
@@ -2309,7 +2336,9 @@ class Lawsuit(interactions.Extension):
             if is_public
             else interactions.ChannelType.GUILD_PRIVATE_THREAD
         )
-        thread_name = f"第{case_id}号{'公开' if is_public else '秘密'}审判庭"
+        thread_name = (
+            f"Case #{case_id} {'Public' if is_public else 'Private'} Trial Chamber"
+        )
 
         channel = await self.bot.fetch_channel(self.config.COURTROOM_CHANNEL_ID)
         trial_thread = await channel.create_thread(
@@ -2331,10 +2360,12 @@ class Lawsuit(interactions.Extension):
 
         await asyncio.gather(
             self.view.send_success(
-                ctx, f"第{case_id}号案决定{'公开' if is_public else '秘密'}审理。"
+                ctx,
+                f"Case #{case_id} will be tried {'publicly' if is_public else 'privately'}.",
             ),
             self.notify_case_participants(
-                case_id, f"第{case_id}号案决定{'公开' if is_public else '秘密'}审理。"
+                case_id,
+                f"Case #{case_id} will be tried {'publicly' if is_public else 'privately'}.",
             ),
             (
                 self.add_members_to_thread(trial_thread, case.judges)
@@ -2347,14 +2378,14 @@ class Lawsuit(interactions.Extension):
 
     async def get_allowed_roles(self, guild: interactions.Guild) -> List[int]:
         role_names = [
-            "公诉人",
-            "自诉人",
-            "原告人",
-            "被告人",
-            "辩护人",
-            "代理人",
-            "被害人",
-            "证人",
+            "Prosecutor",
+            "Private Prosecutor",
+            "Plaintiff",
+            "Defendant",
+            "Defense Attorney",
+            "Legal Representative",
+            "Victim",
+            "Witness",
         ]
         return [role.id for role in guild.roles if role.name in role_names]
 
@@ -2388,19 +2419,23 @@ class Lawsuit(interactions.Extension):
 
     async def get_or_create_chat_thread(
         self, channel: interactions.GuildText
-    ) -> interactions.GuildText:
-        existing_thread = await self.find_existing_chat_thread(channel)
-        if existing_thread:
-            return existing_thread
+    ) -> interactions.ThreadChannel:
+        try:
+            existing_thread = await self.find_existing_chat_thread(channel)
+            if existing_thread:
+                return existing_thread
+        except Exception as e:
+            logger.warning(f"Error finding existing chat thread: {e}")
+
         return await self.create_new_chat_thread(channel)
 
     async def find_existing_chat_thread(
         self, channel: interactions.GuildText
-    ) -> Optional[interactions.GuildText]:
-        return next(
-            (t for t in await channel.fetch_active_threads() if t.name == "聊天室"),
-            None,
-        )
+    ) -> Optional[interactions.ThreadChannel]:
+        active_threads = await channel.fetch_active_threads()
+        if hasattr(active_threads, "threads"):
+            return next((t for t in active_threads.threads if t.name == "聊天室"), None)
+        return None
 
     @cached(cache=TTLCache(maxsize=1024, ttl=60))
     async def get_case(self, case_id: str) -> Optional[Data]:
