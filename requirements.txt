@@ -1,14 +1,11 @@
-aiodns
+aiofiles
 aiohttp
 bleach
-cchardet
 discord-py-interactions
-lmdb
 orjson
 uvloop
-asyncache
 cachetools
-cytoolz
-frozendict
 pydantic
 sortedcontainers
+loguru
+yarl
