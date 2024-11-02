@@ -4,7 +4,6 @@ import asyncio
 import collections
 import contextlib
 import dataclasses
-import enum
 import fcntl
 import functools
 import io
@@ -14,14 +13,12 @@ import os
 import random
 import re
 import secrets
-import textwrap
 import time
 import tracemalloc
 import types
-import weakref
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from enum import IntEnum, StrEnum, auto
 from typing import (
     Annotated,
@@ -30,27 +27,15 @@ from typing import (
     AsyncIterator,
     Awaitable,
     Callable,
-    ClassVar,
     Dict,
-    Final,
     FrozenSet,
     Generic,
     List,
-    Literal,
-    NoReturn,
     Optional,
-    Protocol,
-    Set,
     Tuple,
-    Type,
     TypeAlias,
-    TypeGuard,
     TypeVar,
     Union,
-    cast,
-    final,
-    overload,
-    runtime_checkable,
 )
 
 import aiofiles
@@ -62,31 +47,32 @@ import orjson
 import pydantic
 import sortedcontainers
 import uvloop
-import yarl
-from aiofiles.threadpool.text import AsyncTextIOWrapper
 from interactions.api.events import ExtensionUnload, MessageCreate, NewThreadCreate
 from interactions.client.errors import Forbidden, HTTPException, NotFound
 from loguru import logger
 
-T = TypeVar("T", covariant=True)
-P = TypeVar("P", contravariant=True)
-R = TypeVar("R")
+T = TypeVar("T", bound=object)
+P = TypeVar("P", bound=object, contravariant=True)
+R = TypeVar("R", bound=object)
 
-ContextVarLock: TypeAlias = Dict[str, asyncio.Lock]
+
+ContextVarLock: TypeAlias = Dict[str, asyncio.Lock | None]
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
-THREAD_POOL_SIZE: Final[int] = min(32, multiprocessing.cpu_count() * 2)
-thread_pool: Final[ThreadPoolExecutor] = ThreadPoolExecutor(
-    max_workers=THREAD_POOL_SIZE, thread_name_prefix="Lawsuit"
+THREAD_POOL_SIZE: int = min(32, (os.cpu_count() or multiprocessing.cpu_count()) << 1)
+thread_pool: ThreadPoolExecutor = ThreadPoolExecutor(
+    max_workers=THREAD_POOL_SIZE,
+    thread_name_prefix="Lawsuit",
+    initializer=lambda: os.nice(19),
 )
 
 aiofiles.open = functools.partial(
-    aiofiles.open, mode="r+b", buffering=io.DEFAULT_BUFFER_SIZE, encoding=None
+    aiofiles.open, mode="r+b", encoding=None, errors=None, closefd=True, opener=None
 )
 
-BASE_DIR: Final[str] = os.path.abspath(os.path.dirname(__file__))
-LOG_FILE: Final[str] = os.path.join(BASE_DIR, "lawsuit.log")
+BASE_DIR: str = os.path.dirname(os.path.realpath(__file__))
+LOG_FILE: str = os.path.join(BASE_DIR, "lawsuit.log")
 
 
 logger.remove()
@@ -120,43 +106,45 @@ logger.add(
 # Schema
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
+@dataclasses.dataclass
 class Config:
-    GUILD_ID: Final[int] = dataclasses.field(
-        default=1150630510696075404, metadata={"min": 0}
+    GUILD_ID: int = dataclasses.field(
+        default=1150630510696075404, metadata={"min": 0}, repr=False, compare=False
     )
-    JUDGE_ROLE_ID: Final[int] = dataclasses.field(
-        default=1200100104682614884, metadata={"min": 0}
+    JUDGE_ROLE_ID: int = dataclasses.field(
+        default=1200100104682614884, metadata={"min": 0}, repr=False, compare=False
     )
-    PLAINTIFF_ROLE_ID: Final[int] = dataclasses.field(
-        default=1200043628899356702, metadata={"min": 0}
+    PLAINTIFF_ROLE_ID: int = dataclasses.field(
+        default=1200043628899356702, metadata={"min": 0}, repr=False, compare=False
     )
-    COURTROOM_CHANNEL_ID: Final[int] = dataclasses.field(
-        default=1247290032881008701, metadata={"min": 0}
+    COURTROOM_CHANNEL_ID: int = dataclasses.field(
+        default=1247290032881008701, metadata={"min": 0}, repr=False, compare=False
     )
-    LOG_CHANNEL_ID: Final[int] = dataclasses.field(
-        default=1166627731916734504, metadata={"min": 0}
+    LOG_CHANNEL_ID: int = dataclasses.field(
+        default=1166627731916734504, metadata={"min": 0}, repr=False, compare=False
     )
-    LOG_FORUM_ID: Final[int] = dataclasses.field(
-        default=1159097493875871784, metadata={"min": 0}
+    LOG_FORUM_ID: int = dataclasses.field(
+        default=1159097493875871784, metadata={"min": 0}, repr=False, compare=False
     )
-    LOG_POST_ID: Final[int] = dataclasses.field(
-        default=1279118293936111707, metadata={"min": 0}
+    LOG_POST_ID: int = dataclasses.field(
+        default=1279118293936111707, metadata={"min": 0}, repr=False, compare=False
     )
-    MAX_JUDGES_PER_LAWSUIT: Final[int] = dataclasses.field(
-        default=1, metadata={"min": 1}
+    MAX_JUDGES_PER_LAWSUIT: int = dataclasses.field(
+        default=1, metadata={"min": 1}, repr=False, compare=False
     )
-    MAX_JUDGES_PER_APPEAL: Final[int] = dataclasses.field(
-        default=3, metadata={"min": 1}
+    MAX_JUDGES_PER_APPEAL: int = dataclasses.field(
+        default=3, metadata={"min": 1}, repr=False, compare=False
     )
-    MAX_FILE_SIZE: Final[int] = dataclasses.field(
-        default=10 * 1024 * 1024, metadata={"min": 0}
+    MAX_FILE_SIZE: int = dataclasses.field(
+        default=10485760, metadata={"min": 0}, repr=False, compare=False
     )
-    ALLOWED_MIME_TYPES: Final[FrozenSet[str]] = dataclasses.field(
+    ALLOWED_MIME_TYPES: FrozenSet[str] = dataclasses.field(
         default_factory=lambda: frozenset(
-            {"image/jpeg", "image/png", "application/pdf", "text/plain"}
+            ("image/jpeg", "image/png", "application/pdf", "text/plain")
         ),
         metadata={"min_items": 1},
+        repr=False,
+        compare=False,
     )
 
 
@@ -238,7 +226,12 @@ class CaseAction(StrEnum):
 class Attachment(pydantic.BaseModel):
 
     url: Annotated[
-        str, pydantic.Field(description="Full yarl.URL to the attachment resource")
+        str,
+        pydantic.Field(
+            description="Full yarl.URL to the attachment resource",
+            frozen=True,
+            repr=True,
+        ),
     ]
     filename: Annotated[
         str,
@@ -246,6 +239,8 @@ class Attachment(pydantic.BaseModel):
             min_length=1,
             max_length=255,
             description="Name of the file with extension",
+            frozen=True,
+            pattern=r'^[^/\\:*?"<>|]+$',
         ),
     ]
     content_type: Annotated[
@@ -255,13 +250,16 @@ class Attachment(pydantic.BaseModel):
             max_length=255,
             pattern=r"^[\w-]+/[\w-]+$",
             description="MIME type of the attachment",
+            frozen=True,
+            regex_flags=re.I,
         ),
     ]
 
 
 class Evidence(pydantic.BaseModel):
     user_id: Annotated[
-        int, pydantic.Field(gt=0, description="ID of user submitting evidence")
+        int,
+        pydantic.Field(gt=0, description="ID of user submitting evidence", frozen=True),
     ]
     content: Annotated[
         str,
@@ -269,6 +267,8 @@ class Evidence(pydantic.BaseModel):
             min_length=1,
             max_length=4000,
             description="Main content of the evidence",
+            frozen=True,
+            pattern=r"^[\s\S]*$",
         ),
     ]
     attachments: Annotated[
@@ -277,24 +277,31 @@ class Evidence(pydantic.BaseModel):
             default_factory=tuple,
             max_length=10,
             description="Tuple of evidence attachments",
+            frozen=True,
         ),
     ]
-    message_id: Annotated[int, pydantic.Field(gt=0, description="Discord message ID")]
+    message_id: Annotated[
+        int, pydantic.Field(gt=0, description="Discord message ID", frozen=True)
+    ]
     timestamp: Annotated[
         datetime,
         pydantic.Field(
-            default_factory=lambda: datetime.now(timezone.utc),
+            default_factory=lambda: datetime.now(timezone.utc).replace(microsecond=0),
             description="UTC timestamp of evidence submission",
+            frozen=True,
         ),
     ]
     state: Annotated[
-        EvidenceAction, pydantic.Field(description="Current state of the evidence")
-    ] = EvidenceAction.PENDING
+        EvidenceAction,
+        pydantic.Field(
+            default=EvidenceAction.PENDING, description="Current state of the evidence"
+        ),
+    ]
 
 
 class Data(pydantic.BaseModel):
-    plaintiff_id: Annotated[int, pydantic.Field(gt=0)]
-    defendant_id: Annotated[int, pydantic.Field(gt=0)]
+    plaintiff_id: Annotated[int, pydantic.Field(gt=0, frozen=True)]
+    defendant_id: Annotated[int, pydantic.Field(gt=0, frozen=True)]
     status: CaseStatus = pydantic.Field(default=CaseStatus.FILED)
     thread_id: Optional[Annotated[int, pydantic.Field(gt=0)]] = None
     judges: FrozenSet[int] = pydantic.Field(default_factory=frozenset)
@@ -303,239 +310,129 @@ class Data(pydantic.BaseModel):
     log_message_id: Optional[Annotated[int, pydantic.Field(gt=0)]] = None
     mute_list: FrozenSet[int] = pydantic.Field(default_factory=frozenset)
     roles: Dict[str, FrozenSet[int]] = pydantic.Field(
-        default_factory=lambda: types.MappingProxyType({})
+        default_factory=lambda: types.MappingProxyType({}), frozen=True
     )
-    evidence_queue: Tuple[Evidence, ...] = pydantic.Field(default_factory=tuple)
+    evidence_queue: Tuple[Evidence, ...] = pydantic.Field(
+        default_factory=tuple,
+        max_length=100,
+    )
     accusation: Optional[
-        Annotated[str, pydantic.Field(max_length=1000, min_length=1)]
+        Annotated[
+            str, pydantic.Field(max_length=1000, min_length=1, pattern=r"^[\s\S]*$")
+        ]
     ] = None
-    facts: Optional[Annotated[str, pydantic.Field(max_length=2000, min_length=1)]] = (
-        None
-    )
+    facts: Optional[
+        Annotated[
+            str, pydantic.Field(max_length=2000, min_length=1, pattern=r"^[\s\S]*$")
+        ]
+    ] = None
     created_at: datetime = pydantic.Field(
         default_factory=lambda: datetime.now(timezone.utc).replace(microsecond=0),
         frozen=True,
+        use_enum_values=True,
     )
     updated_at: datetime = pydantic.Field(
         default_factory=lambda: datetime.now(timezone.utc).replace(microsecond=0),
         frozen=True,
+        use_enum_values=True,
     )
 
+    def model_dump(self, exclude_unset: bool = False) -> Dict[str, Any]:
+        data = pydantic.BaseModel.model_dump(self, exclude_unset=exclude_unset)
+        for key, value in data.items():
+            if isinstance(value, frozenset):
+                data[key] = list(value)
+            elif isinstance(value, dict):
+                data[key] = {
+                    k: list(v) if isinstance(v, frozenset) else v
+                    for k, v in value.items()
+                }
+        return data
 
-class Store(Generic[T]):
 
+class Store:
     def __init__(self, config: Config) -> None:
-        self.config: Final[Config] = config
-        self.locks: Final[Dict[str, asyncio.Lock]] = collections.defaultdict(
-            asyncio.Lock
+        self.config = config
+        self.locks: collections.defaultdict[str, asyncio.Lock] = (
+            collections.defaultdict(asyncio.Lock)
         )
-        self.global_lock: Final[asyncio.Lock] = asyncio.Lock()
-        self.thread_pool: Final[ThreadPoolExecutor] = ThreadPoolExecutor(
-            max_workers=min(32, (multiprocessing.cpu_count() or 4) * 2),
-            thread_name_prefix="store_worker",
-        )
-        self.db_path: Final[str] = os.path.join(BASE_DIR, "cases.json")
+        self.global_lock = asyncio.Lock()
+        self.db_path = os.path.join(BASE_DIR, "cases.json")
 
     async def initialize_store(self) -> None:
         try:
-            await asyncio.to_thread(
-                self.db_path.parent.mkdir, parents=True, exist_ok=True
-            )
+            db_dir = os.path.dirname(self.db_path)
+            await asyncio.to_thread(os.makedirs, db_dir, exist_ok=True)
             await self._ensure_db_file()
         except OSError as e:
             logger.critical(f"Failed to initialize store: {e}")
             raise RuntimeError("Store initialization failed") from e
 
     async def _ensure_db_file(self) -> None:
-        if not await asyncio.to_thread(self.db_path.exists):
+        if not os.path.exists(self.db_path):
             async with aiofiles.open(self.db_path, mode="w", encoding="utf-8") as f:
                 await f.write("{}")
                 await f.flush()
                 os.fsync(f.fileno())
             logger.info(f"Created new JSON database file at {self.db_path}")
 
-    async def close_db(self) -> None:
-        try:
-            await asyncio.shield(
-                asyncio.get_running_loop().run_in_executor(
-                    self.thread_pool, self.thread_pool.shutdown, True
-                )
-            )
-            logger.info("Thread pool executor gracefully shut down")
-        except Exception as e:
-            logger.error(f"Error during thread pool shutdown: {e}")
-            raise
-
     @contextlib.asynccontextmanager
-    async def db_operation(self) -> AsyncIterator[None]:
-        try:
-            async with self.global_lock:
-                yield
-        except Exception as e:
-            logger.error(f"Database operation failed: {e}")
-            raise
+    async def _file_lock(self, mode: str, shared: bool = False) -> AsyncIterator[Any]:
+        async with aiofiles.open(self.db_path, mode=mode) as f:
+            lock_type = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+            await asyncio.to_thread(fcntl.flock, f.fileno(), lock_type | fcntl.LOCK_NB)
+            try:
+                yield f
+            finally:
+                await asyncio.to_thread(fcntl.flock, f.fileno(), fcntl.LOCK_UN)
 
-    async def execute_db_operation(
-        self,
-        operation: Callable[[Optional[str], Optional[Dict[str, Any]]], Awaitable[Any]],
-        case_id: Optional[str] = None,
-        case_data: Optional[Dict[str, Any]] = None,
-    ) -> Any:
-        async with self.db_operation():
-            if case_id:
-                async with self.locks[case_id]:
-                    logger.debug(f"Acquired lock for case_id: {case_id}")
-                    try:
-                        return await operation(case_id, case_data)
-                    except Exception as e:
-                        logger.error(f"Operation failed for case {case_id}: {e}")
-                        raise
-            else:
-                logger.debug("Executing operation without case_id")
-                return await operation(None, None)
+    async def read_all(self) -> Dict[str, Dict[str, Any]]:
+        async with self._file_lock("rb", shared=True) as f:
+            return orjson.loads(await f.read() or b"{}")
 
-    async def upsert_case_data(self, case_id: str, case_data: Dict[str, Any]) -> None:
-        if not case_data:
-            raise ValueError("case_data cannot be empty for upsert operation")
-        await self.execute_db_operation(self._upsert_case_sync, case_id, case_data)
-        logger.info(f"Successfully upserted case with case_id: {case_id}")
+    async def read_case(self, case_id: str) -> Optional[Dict[str, Any]]:
+        async with self._file_lock("rb", shared=True) as f:
+            return (orjson.loads(await f.read() or b"{}")).get(case_id)
+
+    async def write_case(self, case_id: str, case_data: Dict[str, Any]) -> None:
+        async with self._file_lock("r+b") as f:
+            data = orjson.loads(await f.read() or b"{}")
+            data[case_id] = case_data
+            serialized = orjson.dumps(
+                data, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
+            )
+            await f.seek(0)
+            await f.write(serialized)
+            await f.truncate()
+            await f.flush()
+            os.fsync(f.fileno())
 
     async def delete_case(self, case_id: str) -> None:
-        await self.execute_db_operation(self._delete_case_sync, case_id)
-        logger.info(f"Successfully deleted case with case_id: {case_id}")
-
-    async def get_all_cases(self) -> Dict[str, Dict[str, Any]]:
-        cases = await self.execute_db_operation(self._get_all_cases_sync)
-        logger.debug(f"Retrieved all cases. Total cases: {len(cases)}")
-        return cases
-
-    async def get_case(self, case_id: str) -> Optional[Dict[str, Any]]:
-        case = await self.execute_db_operation(self._get_case_sync, case_id)
-        logger.debug(f"Case {case_id} {'found' if case else 'not found'}")
-        return case
-
-    async def _upsert_case_sync(
-        self,
-        case_id: Optional[str],
-        case_data: Optional[Dict[str, Any]],
-    ) -> None:
-        if not case_id or not case_data:
-            raise ValueError(
-                "case_id and case_data must be provided for upsert operation"
-            )
-
-        serializable_data = self._convert_frozenset(case_data)
-
-        async with aiofiles.open(self.db_path, mode="r+b", buffering=0) as f:
-            await asyncio.to_thread(fcntl.flock, f.fileno(), fcntl.LOCK_EX)
-            try:
-                content = await f.read()
-                data = orjson.loads(content) if content else {}
-                data[case_id] = serializable_data
-                serialized_content = orjson.dumps(
+        async with self._file_lock("r+b") as f:
+            data = orjson.loads(await f.read() or b"{}")
+            if case_id in data:
+                del data[case_id]
+                serialized = orjson.dumps(
                     data, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
                 )
                 await f.seek(0)
-                await f.write(serialized_content)
+                await f.write(serialized)
                 await f.truncate()
                 await f.flush()
                 os.fsync(f.fileno())
-            finally:
-                await asyncio.to_thread(fcntl.flock, f.fileno(), fcntl.LOCK_UN)
-
-    async def _delete_case_sync(
-        self,
-        case_id: Optional[str],
-        _: Optional[Dict[str, Any]],
-    ) -> None:
-        if not case_id:
-            raise ValueError("case_id must be provided for delete operation")
-
-        async with aiofiles.open(self.db_path, mode="r+b", buffering=0) as f:
-            await asyncio.to_thread(fcntl.flock, f.fileno(), fcntl.LOCK_EX)
-            try:
-                content = await f.read()
-                data = orjson.loads(content) if content else {}
-                if case_id in data:
-                    del data[case_id]
-                    serialized_content = orjson.dumps(
-                        data, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
-                    )
-                    await f.seek(0)
-                    await f.write(serialized_content)
-                    await f.truncate()
-                    await f.flush()
-                    os.fsync(f.fileno())
-            finally:
-                await asyncio.to_thread(fcntl.flock, f.fileno(), fcntl.LOCK_UN)
-
-    async def _get_all_cases_sync(
-        self,
-        _: Optional[str],
-        __: Optional[Dict[str, Any]],
-    ) -> Dict[str, Dict[str, Any]]:
-        if not await asyncio.to_thread(os.path.exists, self.db_path):
-            logger.warning(
-                f"Database file not found at {self.db_path}. Creating new file"
-            )
-            async with aiofiles.open(self.db_path, mode="w", encoding="utf-8") as f:
-                await f.write("{}")
-                await f.flush()
-                os.fsync(f.fileno())
-
-        try:
-            async with aiofiles.open(self.db_path, mode="rb") as f:
-                await asyncio.to_thread(fcntl.flock, f.fileno(), fcntl.LOCK_SH)
-                try:
-                    content = await f.read()
-                    cases = orjson.loads(content) if content else {}
-                    return cases
-                finally:
-                    await asyncio.to_thread(fcntl.flock, f.fileno(), fcntl.LOCK_UN)
-        except Exception as e:
-            logger.error(f"Error reading database: {e}")
-            raise
-
-    async def _get_case_sync(
-        self,
-        case_id: Optional[str],
-        _: Optional[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        if not case_id:
-            raise ValueError("case_id must be provided for get_case operation")
-
-        async with aiofiles.open(self.db_path, mode="rb") as f:
-            await asyncio.to_thread(fcntl.flock, f.fileno(), fcntl.LOCK_SH)
-            try:
-                content = await f.read()
-                data = orjson.loads(content) if content else {}
-                return data.get(case_id)
-            finally:
-                await asyncio.to_thread(fcntl.flock, f.fileno(), fcntl.LOCK_UN)
-
-    @staticmethod
-    def _convert_frozenset(obj: Any) -> Any:
-        match obj:
-            case frozenset() as fs:
-                return sorted(fs)
-            case dict() as d:
-                return {k: Store._convert_frozenset(v) for k, v in d.items()}
-            case (list() | set() | tuple()) as c:
-                return [Store._convert_frozenset(item) for item in c]
-            case _:
-                return obj
 
 
 class Repository(Generic[T]):
     def __init__(self, config: Config) -> None:
-        self.config: Final[Config] = config
-        self.case_store: Final[Store[T]] = Store(config)
-        self.cached_cases: Final[cachetools.TTLCache[str, T]] = cachetools.TTLCache(
-            maxsize=2**10, ttl=3600
+        self.config = config
+        self.store = Store(config)
+        self.cached_cases: cachetools.TTLCache = cachetools.TTLCache(
+            maxsize=1024, ttl=3600
         )
-        self._case_locks: Final[Dict[str, asyncio.Lock]] = {}
-        self._global_lock: Final[asyncio.Lock] = asyncio.Lock()
-        self._initialization_lock: Final[asyncio.Lock] = asyncio.Lock()
+        self._case_locks: collections.defaultdict[str, asyncio.Lock] = (
+            collections.defaultdict(asyncio.Lock)
+        )
+        self._initialization_lock: asyncio.Lock = asyncio.Lock()
         self._initialized: bool = False
 
     async def initialize_repository(self) -> None:
@@ -543,7 +440,7 @@ class Repository(Generic[T]):
             return
         async with self._initialization_lock:
             if not self._initialized:
-                await self.case_store.initialize_store()
+                await self.store.initialize_store()
                 self._initialized = True
                 logger.debug("Repository initialized with optimized configuration")
 
@@ -551,13 +448,7 @@ class Repository(Generic[T]):
     async def case_lock_manager(self, case_id: str) -> AsyncIterator[None]:
         if not isinstance(case_id, str):
             raise TypeError(f"case_id must be str, got {type(case_id)}")
-
-        async with self._global_lock:
-            lock = self._case_locks.get(case_id)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._case_locks[case_id] = lock
-
+        lock = self._case_locks[case_id]
         try:
             async with asyncio.timeout(5.0):
                 await lock.acquire()
@@ -572,17 +463,14 @@ class Repository(Generic[T]):
     async def get_case_data(self, case_id: str) -> Optional[T]:
         if not self._initialized:
             await self.initialize_repository()
-
         try:
-            if case := self.cached_cases.get(case_id):
-                return case
-
-            if case_data := await self.case_store.get_case(case_id):
-                case = await asyncio.to_thread(self._create_case_instance, case_data)
-                self.cached_cases[case_id] = case
-                return case
+            if cached := self.cached_cases.get(case_id):
+                return cached
+            if case_data := await self.store.read_case(case_id):
+                instance = self._create_case_instance(dict(sorted(case_data.items())))
+                self.cached_cases[case_id] = instance
+                return instance
             return None
-
         except Exception as e:
             logger.exception(f"Critical error in get_case_data for {case_id}: {e}")
             raise
@@ -590,11 +478,11 @@ class Repository(Generic[T]):
     async def persist_case(self, case_id: str, case: T) -> None:
         if not isinstance(case, Data):
             raise TypeError(f"Expected Data instance, got {type(case)}")
-
         async with self.case_lock_manager(case_id):
             try:
-                case_dict = case.model_dump(exclude_unset=True)
-                await self.case_store.upsert_case_data(case_id, case_dict)
+                await self.store.write_case(
+                    case_id, case.model_dump(exclude_unset=True)
+                )
                 self.cached_cases[case_id] = case
             except Exception as e:
                 logger.critical(f"Failed to persist case {case_id}: {e}")
@@ -602,10 +490,8 @@ class Repository(Generic[T]):
 
     async def update_case(self, case_id: str, **kwargs: Any) -> None:
         async with self.case_lock_manager(case_id):
-            case = await self.get_case_data(case_id)
-            if not case:
+            if not (case := await self.get_case_data(case_id)):
                 raise KeyError(f"Case {case_id} not found")
-
             try:
                 updated_case = await asyncio.to_thread(
                     self._update_case_instance, case, **kwargs
@@ -618,7 +504,7 @@ class Repository(Generic[T]):
     async def delete_case(self, case_id: str) -> None:
         async with self.case_lock_manager(case_id):
             try:
-                await self.case_store.delete_case(case_id)
+                await self.store.delete_case(case_id)
                 self.cached_cases.pop(case_id, None)
                 self._case_locks.pop(case_id, None)
             except Exception as e:
@@ -628,94 +514,30 @@ class Repository(Generic[T]):
     async def get_all_cases(self) -> Dict[str, T]:
         if not self._initialized:
             await self.initialize_repository()
-
-        case_data = await self.case_store.get_all_cases()
-
-        async def process_case(
-            case_id: str, data: Dict[str, Any]
-        ) -> Optional[Tuple[str, T]]:
-            try:
-                if self._validate_case_data(case_id, data):
-                    case = await asyncio.to_thread(self._create_case_instance, data)
-                    self.cached_cases[case_id] = case
-                    return case_id, case
-                return None
-            except Exception as e:
-                logger.error(f"Failed to process case {case_id}: {e}")
-                return None
-
-        tasks = [process_case(case_id, data) for case_id, data in case_data.items()]
-        results = await asyncio.gather(*tasks)
-
+        case_data = await self.store.read_all()
         return {
-            case_id: case
-            for result in results
-            if result is not None
-            for case_id, case in [result]
+            case_id: self.cached_cases.setdefault(
+                case_id, self._create_case_instance(dict(sorted(data.items())))
+            )
+            for case_id, data in case_data.items()
+            if self._validate_case_data(case_id, data)
         }
 
     def _validate_case_data(self, case_id: str, data: Dict[str, Any]) -> bool:
         try:
-            self._create_case_instance(data)
+            self._create_case_instance(dict(sorted(data.items())))
             return True
         except pydantic.ValidationError as e:
             logger.error(f"Validation error for case {case_id}: {e.errors()}")
             return False
 
-    @contextlib.asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Store[T]]:
-        async with self.case_store.db_operation() as store:
-            try:
-                yield store
-            except Exception as e:
-                logger.critical(f"Transaction failed: {e}")
-                raise
-
     @staticmethod
-    @functools.lru_cache(maxsize=2**10)
     def _create_case_instance(data: Mapping[str, Any]) -> T:
-        return Data(**data)
+        return Data(**dict(data))
 
     @staticmethod
-    @functools.lru_cache(maxsize=2**10)
     def _update_case_instance(case: T, **kwargs: Any) -> T:
-        return case.model_copy(update=kwargs)
-
-    async def get_cases_by_status(self, status: CaseStatus) -> Dict[str, T]:
-        all_cases = await self.get_all_cases()
-        return {cid: case for cid, case in all_cases.items() if case.status == status}
-
-    async def get_cases_by_user(self, user_id: int) -> Dict[str, T]:
-        all_cases = await self.get_all_cases()
-        return {
-            cid: case
-            for cid, case in all_cases.items()
-            if user_id in {case.plaintiff_id, case.defendant_id}
-        }
-
-    async def cleanup_expired_cases(self, expiration_days: int) -> None:
-        if expiration_days < 0:
-            raise ValueError("expiration_days must be non-negative")
-
-        current_time = datetime.now(timezone.utc)
-        expiration_threshold = current_time - timedelta(days=expiration_days)
-
-        all_cases = await self.get_all_cases()
-        expired_cases = [
-            cid
-            for cid, case in all_cases.items()
-            if case.status == CaseStatus.CLOSED
-            and case.updated_at < expiration_threshold
-        ]
-
-        if expired_cases:
-            async with asyncio.TaskGroup() as tg:
-                for cid in expired_cases:
-                    tg.create_task(self.delete_case(cid))
-
-            logger.info(f"Cleaned up {len(expired_cases)} expired cases")
-        else:
-            logger.info("No expired cases to clean up")
+        return Data(**{**case.__dict__, **kwargs})
 
 
 # View
@@ -723,29 +545,35 @@ class Repository(Generic[T]):
 
 class View:
 
-    PROVERBS: Final[Tuple[str, ...]] = (
+    PROVERBS: Tuple[str, ...] = (
         "Iuris prudentia est divinarum atque humanarum rerum notitia, iusti atque iniusti scientia (D. 1, 1, 10, 2).",
         "Iuri operam daturum prius nosse oportet, unde nomen iuris descendat. est autem a iustitia appellatum: nam, ut eleganter celsus definit, ius est ars boni et aequi (D. 1, 1, 1, pr.).",
         "Iustitia est constans et perpetua voluntas ius suum cuique tribuendi (D. 1, 1, 10, pr.).",
     )
 
     def __init__(self, bot: interactions.Client, config: Config) -> None:
-        self.bot: Final[interactions.Client] = bot
-        self.config: Final[Config] = config
-        self.embed_cache: Final[Dict[str, interactions.Embed]] = {}
-        self.button_cache: Final[Dict[str, List[interactions.Button]]] = {}
-        self._proverb_selector: Final[Callable[[date], str]] = (
-            self._create_proverb_selector()
+        self.bot: interactions.Client = bot
+        self.config: Config = config
+        self.embed_cache: Dict[str, interactions.Embed] = collections.defaultdict(
+            lambda: None
         )
-        self.cached_cases: Final[types.MappingProxyType[str, Data]] = (
-            types.MappingProxyType({})
+        self.button_cache: Dict[str, List[interactions.Button]] = (
+            collections.defaultdict(list)
         )
-        self._proverb_cache: Final[cachetools.TTLCache] = cachetools.TTLCache(
-            maxsize=366, ttl=86400
+        self._proverb_selector: Callable[[date], str] = functools.lru_cache(
+            maxsize=366
+        )(self._create_proverb_selector())
+        self.cached_cases: types.MappingProxyType[str, Data] = types.MappingProxyType(
+            dict()
         )
-        self._embed_lock: Final[asyncio.Lock] = asyncio.Lock()
-        self._button_lock: Final[asyncio.Lock] = asyncio.Lock()
-        logger.debug("View initialized with thread-safe caches and optimized selectors")
+        self._proverb_cache: cachetools.TTLCache = cachetools.TTLCache(
+            maxsize=max(366, len(self.PROVERBS)), ttl=86400, timer=time.monotonic
+        )
+        self._embed_lock: asyncio.Lock = asyncio.Lock()
+        self._button_lock: asyncio.Lock = asyncio.Lock()
+        logger.debug(
+            "View initialized with optimized caching and thread-safe primitives"
+        )
 
     async def generate_embed(
         self,
@@ -754,48 +582,48 @@ class View:
         color: EmbedColor = EmbedColor.INFO,
         retry_attempts: int = 3,
     ) -> interactions.Embed:
-        cache_key = f"{title}:{description}:{color.value}"
+        cache_key = str(hash((title, description, color.value)))
+
+        if cached := self.embed_cache.get(cache_key):
+            return cached
 
         async with self._embed_lock:
             if cached := self.embed_cache.get(cache_key):
-                logger.debug(f"Cache hit for embed key: {cache_key}")
                 return cached
 
-        for attempt in range(retry_attempts):
-            try:
-                guild: Optional[interactions.Guild] = await self.bot.fetch_guild(
-                    self.config.GUILD_ID
-                )
-                embed = interactions.Embed(
-                    title=title, description=description, color=color.value
-                )
+            for attempt in range(retry_attempts):
+                try:
+                    guild = await self.bot.fetch_guild(self.config.GUILD_ID)
+                    embed = interactions.Embed.__new__(interactions.Embed)
+                    embed.__init__(
+                        title=title,
+                        description=description,
+                        color=color.value,
+                        timestamp=datetime.now(timezone.utc).replace(microsecond=0),
+                    )
 
-                if guild and guild.icon:
-                    embed.set_footer(text=guild.name, icon_url=str(guild.icon.url))
-                else:
-                    embed.set_footer(text="鍵政大舞台")
+                    footer_text = guild.name if guild else "鍵政大舞台"
+                    footer_icon = str(guild.icon.url) if guild and guild.icon else None
+                    embed.set_footer(text=footer_text, icon_url=footer_icon)
 
-                embed.timestamp = datetime.now(timezone.utc)
-
-                async with self._embed_lock:
                     self.embed_cache[cache_key] = embed
+                    return embed
 
-                logger.debug(f"Created and cached embed on attempt {attempt + 1}")
-                return embed
+                except HTTPException as e:
+                    if attempt == retry_attempts - 1:
+                        logger.error(
+                            f"Failed to create embed after {retry_attempts} attempts",
+                            exc_info=True,
+                        )
+                        raise
+                    await asyncio.sleep(1 << attempt)
+                    continue
 
-            except HTTPException:
-                if attempt == retry_attempts - 1:
+                except Exception as e:
                     logger.error(
-                        f"Failed to create embed after {retry_attempts} attempts",
-                        exc_info=True,
+                        f"Critical error in embed generation: {e}", exc_info=True
                     )
                     raise
-                await asyncio.sleep(1 * (attempt + 1))
-                continue
-
-            except Exception as e:
-                logger.error(f"Critical error in embed generation: {e}", exc_info=True)
-                raise
 
     async def deliver_response(
         self,
@@ -806,59 +634,39 @@ class View:
         retry_attempts: int = 3,
     ) -> None:
         embed = await self.generate_embed(title, message, color)
+        backoff = functools.partial(min, 32)
 
-        for attempt in range(retry_attempts):
+        for attempt in itertools.count():
+            if attempt >= retry_attempts:
+                break
+
             try:
-                await ctx.send(embed=embed, ephemeral=True)
-                logger.debug(
-                    f"Response delivered successfully on attempt {attempt + 1}"
-                )
-                return
-
-            except HTTPException as http_exc:
-                if http_exc.status == 404 and attempt < retry_attempts - 1:
-                    try:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    async with asyncio.timeout(5.0):
                         await ctx.send(embed=embed, ephemeral=True)
-                        logger.debug(
-                            "Successfully sent followup for expired interaction"
-                        )
+                        logger.debug(f"Response delivered on attempt {attempt + 1}")
                         return
-                    except HTTPException as followup_exc:
-                        if attempt == retry_attempts - 1:
-                            logger.error(
-                                f"Failed to send followup message: {followup_exc}",
-                                exc_info=True,
-                            )
-                            raise
-                    except ConnectionError as conn_exc:
-                        if attempt == retry_attempts - 1:
-                            logger.error(
-                                f"Connection error sending followup: {conn_exc}",
-                                exc_info=True,
-                            )
-                            raise
-                elif attempt == retry_attempts - 1:
-                    logger.error(
-                        f"HTTP error in message delivery: {http_exc}", exc_info=True
-                    )
-                    raise
 
-            except ConnectionError as conn_exc:
+            except HTTPException as exc:
+                if exc.status != 404 or attempt == retry_attempts - 1:
+                    logger.error(f"HTTP error in delivery: {exc}", exc_info=True)
+                    raise
+                try:
+                    async with asyncio.timeout(5.0):
+                        await ctx.send(embed=embed, ephemeral=True)
+                        logger.debug("Followup sent for expired interaction")
+                        return
+                except (HTTPException, ConnectionError) as e:
+                    if attempt == retry_attempts - 1:
+                        logger.error(f"Failed followup: {e}", exc_info=True)
+                        raise
+
+            except (ConnectionError, ValueError) as e:
                 if attempt == retry_attempts - 1:
-                    logger.error(
-                        f"Connection error in message delivery: {conn_exc}",
-                        exc_info=True,
-                    )
+                    logger.error(f"Error in delivery: {e}", exc_info=True)
                     raise
 
-            except ValueError as val_exc:
-                if attempt == retry_attempts - 1:
-                    logger.error(
-                        f"Invalid data in message delivery: {val_exc}", exc_info=True
-                    )
-                    raise
-
-            await asyncio.sleep(1 * (attempt + 1))
+            await asyncio.sleep(backoff(2**attempt))
 
     async def send_error(
         self, ctx: interactions.InteractionContext, message: str
@@ -876,145 +684,162 @@ class View:
 
     def create_lawsuit_modal(self, is_appeal: bool = False) -> interactions.Modal:
         cache_key = is_appeal
+        if cache_key in self.lawsuit_modal_store:
+            return self.lawsuit_modal_store[cache_key]
 
-        if modal := self.lawsuit_modal_store.get(cache_key):
-            logger.debug(f"Cache hit for modal: is_appeal={is_appeal}")
-            return modal
-
-        title = "Appeal Form" if is_appeal else "Lawsuit Form"
-        custom_id = f"{'appeal' if is_appeal else 'lawsuit'}_form_modal"
         fields = self.define_modal_fields(is_appeal)
+        numbered_fields = [
+            field.__class__(
+                custom_id=f"{field.custom_id}_{i}",
+                label=field.label,
+                placeholder=field.placeholder,
+                required=field.required,
+                min_length=field.min_length,
+                max_length=field.max_length,
+            )
+            for i, field in enumerate(fields)
+        ]
 
-        for i, dataclasses.field in enumerate(fields):
-            dataclasses.field.custom_id = f"{dataclasses.field.custom_id}_{i}"
+        modal = interactions.Modal(
+            *numbered_fields,
+            title=("Appeal Form" if is_appeal else "Lawsuit Form"),
+            custom_id=f"{'appeal' if is_appeal else 'lawsuit'}_form_modal",
+        )
 
-        modal = interactions.Modal(*fields, title=title, custom_id=custom_id)
         self.lawsuit_modal_store[cache_key] = modal
-        logger.debug(f"Created and cached modal: {custom_id}")
         return modal
 
     @staticmethod
-    @functools.cache
     def define_modal_fields(
         is_appeal: bool,
-    ) -> List[Union[interactions.ShortText, interactions.ParagraphText]]:
-        fields = [
-            interactions.ShortText(
-                custom_id="case_number" if is_appeal else "defendant_id",
-                label="Case Number" if is_appeal else "Defendant ID",
-                placeholder=(
-                    "Enter the original case number"
-                    if is_appeal
-                    else "Enter the defendant's user ID"
-                ),
+    ) -> tuple[Union[interactions.ShortText, interactions.ParagraphText], ...]:
+        field_configs = (
+            (
+                ("case_number", "Case Number", "Enter the original case number")
+                if is_appeal
+                else ("defendant_id", "Defendant ID", "Enter the defendant's user ID")
             ),
-            interactions.ShortText(
-                custom_id="appeal_reason" if is_appeal else "accusation",
-                label="Reason for Appeal" if is_appeal else "Accusation",
-                placeholder=(
-                    "Enter the reason for appeal"
-                    if is_appeal
-                    else "Enter the accusation"
-                ),
+            (
+                ("appeal_reason", "Reason for Appeal", "Enter the reason for appeal")
+                if is_appeal
+                else ("accusation", "Accusation", "Enter the accusation")
             ),
+        )
+
+        fields = tuple(
+            interactions.ShortText(
+                custom_id=custom_id,
+                label=label,
+                placeholder=placeholder,
+            )
+            for custom_id, label, placeholder in field_configs
+        ) + (
             interactions.ParagraphText(
                 custom_id="facts",
                 label="Facts",
                 placeholder="Describe the relevant facts",
             ),
-        ]
+        )
+
         logger.debug(f"Defined optimized modal fields: is_appeal={is_appeal}")
         return fields
 
-    @functools.cached_property
+    @property
     def action_buttons_store(self) -> interactions.ActionRow:
-        buttons = (
-            interactions.Button(
-                style=interactions.ButtonStyle.PRIMARY,
-                label="File Lawsuit",
-                custom_id="initiate_lawsuit_button",
-            ),
-            interactions.Button(
-                style=interactions.ButtonStyle.SECONDARY,
-                label="File Appeal",
-                custom_id="initiate_appeal_button",
-            ),
+        buttons = interactions.ActionRow(
+            *(
+                interactions.Button(
+                    style=getattr(interactions.ButtonStyle, style),
+                    label=label,
+                    custom_id=f"initiate_{action}_button",
+                )
+                for style, label, action in (
+                    ("PRIMARY", "File Lawsuit", "lawsuit"),
+                    ("SECONDARY", "File Appeal", "appeal"),
+                )
+            )
         )
-        action_row = interactions.ActionRow(*buttons)
         logger.debug("Created optimized action buttons")
-        return action_row
+        return buttons
 
     async def create_summary_embed(
         self, case_id: str, case: Data
     ) -> interactions.Embed:
-        fields = [
-            (
-                "Presiding Judge",
-                " ".join(f"<@{judge_id}>" for judge_id in case.judges)
-                or "Not yet assigned",
-            ),
-            ("Plaintiff", f"<@{case.plaintiff_id}>"),
-            ("Defendant", f"<@{case.defendant_id}>"),
-            ("Accusation", case.accusation or "None"),
-            ("Facts", case.facts or "None"),
-        ]
-
         embed = await self.generate_embed(f"Case #{case_id}")
-        for name, value in fields:
-            embed.add_field(name=name, value=value, inline=False)
+        embed.add_fields(
+            *(
+                interactions.EmbedField(
+                    name=name,
+                    value=(
+                        " ".join(f"<@{j}>" for j in case.judges) or "Not yet assigned"
+                        if name == "Presiding Judge"
+                        else (
+                            f"<@{getattr(case, f'{name.lower()}_id')}>"
+                            if name in ("Plaintiff", "Defendant")
+                            else getattr(case, name.lower()) or "None"
+                        )
+                    ),
+                    inline=False,
+                )
+                for name in (
+                    "Presiding Judge",
+                    "Plaintiff",
+                    "Defendant",
+                    "Accusation",
+                    "Facts",
+                )
+            )
+        )
         logger.debug(f"Created optimized summary embed: case_id={case_id}")
         return embed
 
-    @cachetools.cached(cache=cachetools.TTLCache(maxsize=1000, ttl=86400))
     def create_action_buttons(self, case_id: str) -> List[interactions.ActionRow]:
         buttons = [
-            interactions.Button(
-                style=interactions.ButtonStyle.DANGER,
-                label="Dismiss",
-                custom_id=f"dismiss_{case_id}",
-            ),
-            interactions.Button(
-                style=interactions.ButtonStyle.SUCCESS,
-                label="Accept",
-                custom_id=f"accept_{case_id}",
-            ),
-            interactions.Button(
-                style=interactions.ButtonStyle.SECONDARY,
-                label="Withdraw",
-                custom_id=f"withdraw_{case_id}",
-            ),
+            interactions.ActionRow(
+                *(
+                    interactions.Button(
+                        style=getattr(interactions.ButtonStyle, style),
+                        label=label,
+                        custom_id=f"{action}_{case_id}",
+                    )
+                    for style, label, action in (
+                        ("DANGER", "Dismiss", "dismiss"),
+                        ("SUCCESS", "Accept", "accept"),
+                        ("SECONDARY", "Withdraw", "withdraw"),
+                    )
+                )
+            )
         ]
-        action_row = interactions.ActionRow(*buttons)
         logger.debug(f"Created optimized action buttons: case_id={case_id}")
-        return [action_row]
+        return buttons
 
-    def create_trial_privacy_buttons(
+    async def create_trial_privacy_buttons(
         self, case_id: str
     ) -> Tuple[interactions.Button, ...]:
         cache_key = f"trial_privacy_{case_id}"
 
-        with self._button_lock:
-            if buttons := self.button_cache.get(cache_key):
-                logger.debug(f"Cache hit for privacy buttons: case_id={case_id}")
-                return tuple(buttons)
+        try:
+            return tuple(self.button_cache[cache_key])
+        except KeyError:
+            async with self._button_lock:
+                if cache_key in self.button_cache:
+                    return tuple(self.button_cache[cache_key])
 
-            buttons = (
-                interactions.Button(
-                    style=interactions.ButtonStyle.SUCCESS,
-                    label="Yes",
-                    custom_id=f"public_trial_yes_{case_id}",
-                ),
-                interactions.Button(
-                    style=interactions.ButtonStyle.DANGER,
-                    label="No",
-                    custom_id=f"public_trial_no_{case_id}",
-                ),
-            )
-            self.button_cache[cache_key] = list(buttons)
-            logger.debug(f"Created and cached privacy buttons: case_id={case_id}")
-            return buttons
+                buttons = tuple(
+                    map(
+                        lambda x: interactions.Button(
+                            style=getattr(interactions.ButtonStyle, x[0]),
+                            label=x[1],
+                            custom_id=f"public_trial_{x[2]}_{case_id}",
+                        ),
+                        (("SUCCESS", "Yes", "yes"), ("DANGER", "No", "no")),
+                    )
+                )
 
-    @cachetools.cached(cache=cachetools.TTLCache(maxsize=1000, ttl=86400))
+                self.button_cache[cache_key] = list(buttons)
+                logger.debug(f"Created and cached privacy buttons: case_id={case_id}")
+                return buttons
+
     def create_end_trial_button(self, case_id: str) -> interactions.Button:
         button = interactions.Button(
             style=interactions.ButtonStyle.DANGER,
@@ -1024,111 +849,127 @@ class View:
         logger.debug(f"Created optimized end trial button: case_id={case_id}")
         return button
 
-    @cachetools.cached(cache=cachetools.TTLCache(maxsize=1000, ttl=86400))
     def create_user_management_buttons(
-        self, user_id: int
+        self, user_id: int, _cache: Dict[int, Tuple[interactions.Button, ...]] = {}
     ) -> Tuple[interactions.Button, ...]:
-        actions = (
-            ("Mute", "mute", interactions.ButtonStyle.PRIMARY),
-            ("Unmute", "unmute", interactions.ButtonStyle.SUCCESS),
-        )
-        buttons = tuple(
-            interactions.Button(
-                style=style, label=label, custom_id=f"{action}_{user_id}"
+        return tuple(
+            map(
+                lambda x: interactions.Button(
+                    style=x[2], label=x[0], custom_id=f"{x[1]}_{user_id}"
+                ).__tap__(
+                    lambda b: logger.debug(
+                        f"Created button {b.label} for user {user_id}"
+                    )
+                ),
+                (
+                    ("Mute", "mute", interactions.ButtonStyle.PRIMARY),
+                    ("Unmute", "unmute", interactions.ButtonStyle.SUCCESS),
+                ),
             )
-            for label, action, style in actions
         )
-        logger.debug(f"Created optimized user management buttons: user_id={user_id}")
-        return buttons
 
-    @cachetools.cached(cache=cachetools.TTLCache(maxsize=1000, ttl=86400))
     def create_message_management_buttons(
         self, message_id: int
     ) -> Tuple[interactions.Button, ...]:
-        buttons = (
+        return tuple(
             interactions.Button(
-                style=interactions.ButtonStyle.PRIMARY,
-                label="Pin",
-                custom_id=f"pin_{message_id}",
-            ),
-            interactions.Button(
-                style=interactions.ButtonStyle.DANGER,
-                label="Delete",
-                custom_id=f"delete_{message_id}",
-            ),
+                style=getattr(interactions.ButtonStyle, style),
+                label=label,
+                custom_id=f"{action}_{message_id}",
+            ).__tap__(
+                lambda b: logger.debug(
+                    f"Created {b.label} button for message {message_id}"
+                )
+            )
+            for style, label, action in (
+                ("PRIMARY", "Pin", "pin"),
+                ("DANGER", "Delete", "delete"),
+            )
         )
-        logger.debug(f"Created optimized message buttons: message_id={message_id}")
-        return buttons
 
-    @cachetools.cached(cache=cachetools.TTLCache(maxsize=1000, ttl=86400))
     def create_evidence_action_buttons(
         self, case_id: str, user_id: int
     ) -> Tuple[interactions.Button, ...]:
-        buttons = (
+        return tuple(
             interactions.Button(
-                style=interactions.ButtonStyle.SUCCESS,
-                label="Make Public",
-                custom_id=f"approve_evidence_{case_id}_{user_id}",
-            ),
-            interactions.Button(
-                style=interactions.ButtonStyle.DANGER,
-                label="Keep Private",
-                custom_id=f"reject_evidence_{case_id}_{user_id}",
-            ),
+                style=getattr(interactions.ButtonStyle, style),
+                label=label,
+                custom_id=f"{action}_evidence_{case_id}_{user_id}",
+            ).__tap__(
+                lambda b: logger.debug(
+                    f"Created optimized {b.label} evidence button: case_id={case_id}, user_id={user_id}"
+                )
+            )
+            for style, label, action in (
+                ("SUCCESS", "Make Public", "approve"),
+                ("DANGER", "Keep Private", "reject"),
+            )
         )
-        logger.debug(
-            f"Created optimized evidence buttons: case_id={case_id}, user_id={user_id}"
-        )
-        return buttons
 
     def _create_proverb_selector(self) -> Callable[[date], str]:
-        proverb_count = len(self.PROVERBS)
-        shuffled_indices = tuple(
+        proverb_count: int = len(self.PROVERBS)
+        shuffled_indices: tuple[int, ...] = tuple(
             random.SystemRandom().sample(range(proverb_count), proverb_count)
         )
         logger.debug("Created optimized proverb selector with secure randomization")
 
         def select_proverb(current_date: date) -> str:
             index_position = current_date.toordinal() % proverb_count
-            selected_index = shuffled_indices[index_position]
-            proverb = self.PROVERBS[selected_index]
+            proverb = self.PROVERBS[shuffled_indices[index_position]]
             logger.debug(f"Selected optimized proverb for {current_date}")
             return proverb
 
         return select_proverb
 
     def select_daily_proverb(self, current_date: Optional[date] = None) -> str:
-        current_date = current_date or date.today()
+        cache = self._proverb_cache
+        selector = self._proverb_selector
 
-        if proverb := self._proverb_cache.get(current_date):
-            logger.debug(f"Cache hit for proverb: date={current_date}")
-            return proverb
+        today = current_date or date.today()
+        cache_key = today.toordinal()
 
-        proverb = self._proverb_selector(current_date)
-        self._proverb_cache[current_date] = proverb
-        logger.debug(f"Selected and cached new proverb for {current_date}")
+        if cache_key in cache:
+            return cache[cache_key]
+
+        proverb = selector(today)
+        cache[cache_key] = proverb
+        logger.debug(
+            f"{'Cache hit' if cache_key in cache else 'Selected and cached'} proverb for {today}"
+        )
         return proverb
 
     def clear_caches(self) -> None:
-        with self._embed_lock, self._button_lock:
+        try:
+            for lock in (self._embed_lock, self._button_lock):
+                if lock.locked():
+                    lock.release()
+
             self.embed_cache.clear()
             self.button_cache.clear()
 
-        caches = [
-            self.lawsuit_modal_store,
-            self.action_buttons_store,
-            self._proverb_cache,
-        ]
-        for cache in caches:
-            cache.clear()
-        logger.info("Cleared all caches with thread safety")
+            tuple(
+                map(
+                    dict.clear,
+                    (
+                        self.lawsuit_modal_store,
+                        self.action_buttons_store,
+                        self._proverb_cache,
+                    ),
+                )
+            )
+
+            logger.info("Cache clearing completed with optimal thread safety")
+
+        except Exception as e:
+            logger.critical(f"Critical error during cache clearing: {e}")
+            raise RuntimeError("Cache clearing failed") from e
 
 
 async def user_is_judge(ctx: interactions.BaseContext) -> bool:
-    judge_role_id = Config().JUDGE_ROLE_ID
-    has_role = any(role.id == judge_role_id for role in ctx.author.roles)
-    logger.debug(f"Optimized judge role check: has_role={has_role}")
-    return has_role
+    judge_id = Config().JUDGE_ROLE_ID
+    result = next((True for r in ctx.author.roles if r.id == judge_id), False)
+    logger.debug(f"Ultra-optimized judge role validation: {result}")
+    return result
 
 
 # Controller
@@ -1137,64 +978,48 @@ async def user_is_judge(ctx: interactions.BaseContext) -> bool:
 class Lawsuit(interactions.Extension):
     def __init__(self, bot: interactions.Client) -> None:
         self._cleanup_task = None
-        self.bot: Final[interactions.Client] = bot
-        self.config: Final[Config] = Config()
-        self.store: Final[Store] = Store(self.config)
-        self.repository: Final[Repository] = Repository(self.config)
-        self.view: Final[View] = View(bot, self.config)
-        self.cached_cases: Dict[str, Data] = {}
-        self.case_data_cache: cachetools.TTLCache[str, Data] = cachetools.TTLCache(
-            maxsize=1000, ttl=timedelta(minutes=5).total_seconds()
-        )
-        self._case_locks: Final[sortedcontainers.SortedDict[str, asyncio.Lock]] = (
-            sortedcontainers.SortedDict()
-        )
-        self._lock_timestamps: Final[sortedcontainers.SortedDict[str, float]] = (
-            sortedcontainers.SortedDict()
-        )
-        self._case_lock: Final[asyncio.Lock] = asyncio.Lock()
-        self.case_task_queue: Final[asyncio.Queue[Callable[[], Awaitable[None]]]] = (
-            asyncio.Queue(maxsize=10000)
-        )
-        self.shutdown_event: Final[asyncio.Event] = asyncio.Event()
-        self.lawsuit_button_message_id: Optional[int] = None
-        self.case_handlers: Final[Mapping[CaseAction, Callable]] = (
-            types.MappingProxyType(
-                {
-                    CaseAction.FILE: self.handle_file_case_request,
-                    CaseAction.WITHDRAW: functools.partial(
-                        self.handle_case_closure, action=CaseAction.WITHDRAW
-                    ),
-                    CaseAction.CLOSE: functools.partial(
-                        self.handle_case_closure, action=CaseAction.CLOSE
-                    ),
-                    CaseAction.DISMISS: functools.partial(
-                        self.handle_case_closure, action=CaseAction.DISMISS
-                    ),
-                    CaseAction.REGISTER: self.handle_accept_case_request,
-                }
-            )
-        )
-        self.case_locks: Final[cachetools.TTLCache[str, asyncio.Lock]] = (
-            cachetools.TTLCache(maxsize=1000, ttl=timedelta(minutes=5).total_seconds())
-        )
-        self._init_task: Final[asyncio.Task] = asyncio.create_task(
+        self.bot = bot
+        self.config = Config()
+        self.store = Store(self.config)
+        self.repo: Repository = Repository(self.config)
+        self.view = View(bot, self.config)
+        self.cached_cases: dict[str, Repository] = {}
+        self.case_data_cache = cachetools.TTLCache(maxsize=1000, ttl=300)
+        self._case_locks = sortedcontainers.SortedDict()
+        self._lock_timestamps = sortedcontainers.SortedDict()
+        self._case_lock = asyncio.Lock()
+        self.case_task_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=10000)
+        self.shutdown_event = asyncio.Event()
+        self.lawsuit_button_message_id = None
+        self.case_handlers = {
+            CaseAction.FILE: self.handle_file_case_request,
+            CaseAction.WITHDRAW: lambda ctx, case_id, case, member: self.handle_case_closure(
+                ctx, case_id, case, member, action=CaseAction.WITHDRAW
+            ),
+            CaseAction.CLOSE: lambda ctx, case_id, case, member: self.handle_case_closure(
+                ctx, case_id, case, member, action=CaseAction.CLOSE
+            ),
+            CaseAction.DISMISS: lambda ctx, case_id, case, member: self.handle_case_closure(
+                ctx, case_id, case, member, action=CaseAction.DISMISS
+            ),
+            CaseAction.REGISTER: self.handle_accept_case_request,
+        }
+        self.case_locks = cachetools.TTLCache(maxsize=1000, ttl=300)
+        self._init_task = asyncio.create_task(
             self.initialize_background_tasks(), name="LawsuitInitialization"
         )
-        self._init_task.add_done_callback(lambda t: self.handle_init_exception(t))
+        self._init_task.add_done_callback(self.handle_init_exception)
+
+    # Tasks
 
     async def initialize_background_tasks(self) -> None:
-        tasks = [
-            asyncio.create_task(self._fetch_cases(), name="FetchCasesTask"),
-            asyncio.create_task(
-                self._daily_embed_update(), name="DailyEmbedUpdateTask"
-            ),
-            asyncio.create_task(self._process_task_queue(), name="ProcessTaskQueue"),
-            asyncio.create_task(
-                self._periodic_consistency_check(), name="ConsistencyCheckTask"
-            ),
-        ]
-        for task in tasks:
+        tasks = {
+            "_fetch_cases": self._fetch_cases,
+            "_daily_embed_update": self._daily_embed_update,
+            "_process_task_queue": self._process_task_queue,
+        }
+        for name, coro in tasks.items():
+            task = asyncio.create_task(coro(), name=name)
             task.add_done_callback(self._handle_task_exception)
 
     @staticmethod
@@ -1209,33 +1034,32 @@ class Lawsuit(interactions.Extension):
             )
 
     def _handle_task_exception(self, task: asyncio.Task[Any]) -> None:
-        if task.cancelled():
-            logger.info(f"Task {task.get_name()} cancelled gracefully")
-            return
-
-        exception = task.exception()
-        if exception:
-            if isinstance(exception, asyncio.CancelledError):
-                logger.info(f"Task {task.get_name()} cancelled via CancelledError")
-            else:
-                logger.critical(
-                    f"Critical task failure in {task.get_name()}",
-                    exc_info=exception,
-                    extra={"task_name": task.get_name()},
-                )
-                self.restart_task(task)
+        match task:
+            case _ if task.cancelled():
+                logger.info(f"Task {task.get_name()} cancelled gracefully")
+                return
+            case _ if (exc := task.exception()):
+                match exc:
+                    case asyncio.CancelledError():
+                        logger.info(
+                            f"Task {task.get_name()} cancelled via CancelledError"
+                        )
+                    case _:
+                        logger.critical(
+                            f"Critical task failure in {task.get_name()}",
+                            exc_info=exc,
+                            extra={"task_name": task.get_name()},
+                        )
+                        self.restart_task(task)
 
     def restart_task(self, task: asyncio.Task[Any]) -> None:
         task_name = task.get_name().lower()
-        task_method = getattr(self, f"_{task_name}", None)
-
-        if not callable(task_method):
+        if not (task_method := getattr(self, f"_{task_name}", None)):
             logger.error(
                 f"Task restart failed - method not found: {task_name}",
                 extra={"task_name": task_name},
             )
             return
-
         new_task = asyncio.create_task(task_method(), name=task.get_name())
         new_task.add_done_callback(self._handle_task_exception)
         logger.info(f"Task {task.get_name()} restarted successfully")
@@ -1247,24 +1071,22 @@ class Lawsuit(interactions.Extension):
         logger.info("Lock cleanup completed successfully")
 
     def __del__(self) -> None:
-        cleanup_task = getattr(self, "_cleanup_task", None)
-        if isinstance(cleanup_task, asyncio.Task) and not cleanup_task.done():
-            cleanup_task.cancel()
-            logger.info("Cleanup task cancelled during deletion")
+        if cleanup_task := getattr(self, "_cleanup_task", None):
+            if isinstance(cleanup_task, asyncio.Task) and not cleanup_task.done():
+                cleanup_task.cancel()
+                logger.info("Cleanup task cancelled during deletion")
 
     async def _fetch_cases(self) -> None:
         while not self.shutdown_event.is_set():
             try:
-                cases = await self.store.get_all_cases()
+                cases = await self.repo.get_all_cases()
                 self.cached_cases.clear()
-                self.cached_cases.update(
-                    {case_id: Data(**case_data) for case_id, case_data in cases.items()}
-                )
+                self.cached_cases.update(cases)
                 logger.info(
                     "Cases fetched successfully",
                     extra={"case_count": len(self.cached_cases)},
                 )
-                await asyncio.sleep(timedelta(minutes=5).total_seconds())
+                await asyncio.sleep(300)
             except Exception as e:
                 logger.exception(
                     "Case fetch failed", exc_info=True, extra={"error": str(e)}
@@ -1276,12 +1098,12 @@ class Lawsuit(interactions.Extension):
     async def _process_task_queue(self) -> None:
         while not self.shutdown_event.is_set():
             try:
-                task_callable = await asyncio.wait_for(
+                if task_callable := await asyncio.wait_for(
                     self.case_task_queue.get(), timeout=1.0
-                )
-                await asyncio.shield(task_callable())
-                self.case_task_queue.task_done()
-                logger.debug("Task processed successfully")
+                ):
+                    await asyncio.shield(task_callable())
+                    self.case_task_queue.task_done()
+                    logger.debug("Task processed successfully")
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
@@ -1290,22 +1112,9 @@ class Lawsuit(interactions.Extension):
                 )
                 self.case_task_queue.task_done()
 
-    async def _periodic_consistency_check(self) -> None:
-        while not self.shutdown_event.is_set():
-            await asyncio.sleep(timedelta(hours=1).total_seconds())
-            try:
-                await self._verify_consistency()
-            except asyncio.CancelledError:
-                logger.info("Consistency check cancelled")
-                break
-            except Exception as e:
-                logger.exception(
-                    "Consistency check failed", exc_info=True, extra={"error": str(e)}
-                )
-
     async def _daily_embed_update(self) -> None:
         while not self.shutdown_event.is_set():
-            await asyncio.sleep(timedelta(days=1).total_seconds())
+            await asyncio.sleep(86400)
             try:
                 await self._update_lawsuit_button_embed()
             except asyncio.CancelledError:
@@ -1315,45 +1124,6 @@ class Lawsuit(interactions.Extension):
                 logger.error(
                     "Embed update failed", exc_info=True, extra={"error": str(e)}
                 )
-
-    async def _verify_consistency(self) -> None:
-        logger.info("Starting consistency verification")
-        try:
-            storage_cases = await self.store.get_all_cases()
-            storage_case_ids = frozenset(storage_cases.keys())
-            current_case_ids = frozenset(self.cached_cases.keys())
-
-            missing_in_storage = current_case_ids - storage_case_ids
-            missing_in_memory = storage_case_ids - current_case_ids
-
-            inconsistent = frozenset(
-                case_id
-                for case_id in current_case_ids & storage_case_ids
-                if self.cached_cases[case_id].model_dump() != storage_cases[case_id]
-            )
-
-            update_tasks = [
-                self.repository.persist_case(case_id, self.cached_cases[case_id])
-                for case_id in missing_in_storage | inconsistent
-            ]
-
-            for case_id in missing_in_memory:
-                self.cached_cases[case_id] = Data(**storage_cases[case_id])
-
-            if update_tasks:
-                await asyncio.gather(*update_tasks)
-                logger.info(
-                    "Cases persisted successfully",
-                    extra={"updated_count": len(update_tasks)},
-                )
-
-            logger.info("Consistency verification completed")
-        except Exception as e:
-            logger.error(
-                "Consistency verification failed",
-                exc_info=True,
-                extra={"error": str(e)},
-            )
 
     async def _update_lawsuit_button_embed(self) -> None:
         logger.info("Starting embed update")
@@ -1387,7 +1157,7 @@ class Lawsuit(interactions.Extension):
                 extra={"error": str(e)},
             )
 
-    # Component handlers
+    # Listeners
 
     @interactions.listen(NewThreadCreate)
     async def on_thread_create(self, event: NewThreadCreate) -> None:
@@ -1415,17 +1185,26 @@ class Lawsuit(interactions.Extension):
             return
 
         try:
-            if isinstance(event.message.channel, interactions.DMChannel):
-                await self.handle_direct_message_evidence(event.message)
-                logger.debug(
-                    "DM message processed", extra={"user_id": event.message.author.id}
-                )
-            else:
-                await self.handle_channel_message(event.message)
-                logger.debug(
-                    "Channel message processed",
-                    extra={"channel_id": event.message.channel.id},
-                )
+            handler = (
+                self.handle_direct_message_evidence
+                if isinstance(event.message.channel, interactions.DMChannel)
+                else self.handle_channel_message
+            )
+            await handler(event.message)
+            logger.debug(
+                f"{handler.__name__.replace('handle_', '').title()} processed",
+                extra={
+                    (
+                        "user_id"
+                        if isinstance(event.message.channel, interactions.DMChannel)
+                        else "channel_id"
+                    ): (
+                        event.message.author.id
+                        if isinstance(event.message.channel, interactions.DMChannel)
+                        else event.message.channel.id
+                    )
+                },
+            )
         except Exception as e:
             logger.exception(
                 "Message processing failed",
@@ -1442,11 +1221,11 @@ class Lawsuit(interactions.Extension):
         if self._cleanup_task and not self._cleanup_task.done():
             try:
                 self._cleanup_task.cancel()
-                await asyncio.wait_for(self._cleanup_task, timeout=5.0)
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(self._cleanup_task, timeout=5.0)
                 logger.debug("Cleanup task cancelled successfully")
             except asyncio.TimeoutError:
                 logger.error("Cleanup task cancellation timed out")
-
             except Exception as e:
                 logger.exception(
                     "Cleanup task cancellation failed",
@@ -1458,19 +1237,17 @@ class Lawsuit(interactions.Extension):
         await self.cleanup_locks()
         logger.info("Lawsuit extension unloaded successfully")
 
+    # Component
+
     @interactions.component_callback("initiate_lawsuit_button")
     async def initiate_lawsuit(self, ctx: interactions.ComponentContext) -> None:
         try:
-            user_id = ctx.author.id
-
-            if await self.has_ongoing_lawsuit(user_id):
+            if await self.has_ongoing_lawsuit(ctx.author.id):
                 await self.view.send_error(ctx, "You already have an ongoing lawsuit")
-                logger.debug(f"Duplicate lawsuit attempt by user {user_id}")
+                logger.debug(f"Duplicate lawsuit attempt by user {ctx.author.id}")
                 return
-
-            lawsuit_modal = self.view.create_lawsuit_modal()
-            await ctx.send_modal(lawsuit_modal)
-            logger.info("Lawsuit modal sent", extra={"user_id": user_id})
+            await ctx.send_modal(self.view.create_lawsuit_modal())
+            logger.info("Lawsuit modal sent", extra={"user_id": ctx.author.id})
         except Exception as e:
             logger.exception(
                 "Lawsuit initiation failed",
@@ -1486,66 +1263,56 @@ class Lawsuit(interactions.Extension):
     async def submit_lawsuit_form(self, ctx: interactions.ModalContext) -> None:
         try:
             await ctx.defer(ephemeral=True)
-
             logger.debug(f"Processing lawsuit form: {ctx.responses}")
 
-            if not all(ctx.responses.values()):
+            if not (
+                responses := {k: v.strip() for k, v in ctx.responses.items()}
+            ) or not all(responses.values()):
                 await self.view.send_error(
                     ctx, "Please ensure all fields are properly filled"
                 )
                 return
 
-            defendant_id_str = ctx.responses.get("defendant_id_0", "").strip()
-            if not defendant_id_str:
-                await self.view.send_error(ctx, "Valid defendant ID required")
-                return
-
+            defendant_id_str = responses.get("defendant_id_0", "")
             try:
                 defendant_id = int("".join(filter(str.isdigit, defendant_id_str)))
-                try:
-                    user = await self.bot.fetch_user(defendant_id)
-                    if not user:
-                        await self.view.send_error(ctx, "Invalid defendant ID provided")
-                        return
-                except NotFound:
-                    await self.view.send_error(ctx, "User not found")
+                if defendant_id == ctx.author.id:
+                    await self.view.send_error(ctx, "Self-litigation is not permitted")
                     return
-            except ValueError:
-                await self.view.send_error(ctx, "Invalid defendant ID format")
-                return
-
-            if defendant_id == ctx.author.id:
-                await self.view.send_error(ctx, "Self-litigation is not permitted")
+                if not (user := await self.bot.fetch_user(defendant_id)):
+                    await self.view.send_error(ctx, "Invalid defendant ID provided")
+                    return
+            except (ValueError, NotFound):
+                await self.view.send_error(
+                    ctx, "Invalid defendant ID or user not found"
+                )
                 return
 
             sanitized_data = {
                 "defendant_id": str(defendant_id),
-                "accusation": ctx.responses.get("accusation_1", ""),
-                "facts": ctx.responses.get("facts_2", ""),
+                "accusation": responses.get("accusation_1", ""),
+                "facts": responses.get("facts_2", ""),
             }
 
-            async with asyncio.TaskGroup() as tg:
-                case_task = tg.create_task(
-                    self.create_new_case(ctx, sanitized_data, defendant_id)
+            try:
+                case_id, case = await self.create_new_case(
+                    ctx, sanitized_data, defendant_id
                 )
-                case_id, case = await case_task
-
                 if not case_id or not case:
                     await self.view.send_error(ctx, "Failed to create case")
                     return
 
-                setup_task = tg.create_task(self.setup_mediation_thread(case_id, case))
-                notify_task = tg.create_task(self.notify_judges(case_id, ctx.guild_id))
+                await self.setup_mediation_thread(case_id, case)
+                await self.notify_judges(case_id, ctx.guild_id)
+                await self.view.send_success(
+                    ctx, f"Mediation room #{case_id} created successfully"
+                )
 
-                await asyncio.gather(setup_task, notify_task)
+            except Exception as e:
+                logger.exception("Failed to setup case", exc_info=True)
+                await self.view.send_error(ctx, "Failed to setup the case")
+                return
 
-            await self.view.send_success(
-                ctx, f"Mediation room #{case_id} created successfully"
-            )
-
-        except asyncio.TimeoutError:
-            logger.error("Operation timed out during lawsuit submission")
-            await self.view.send_error(ctx, "Operation timed out. Please try again.")
         except Exception as e:
             logger.exception(
                 "Lawsuit submission failed", exc_info=True, extra={"error": str(e)}
@@ -1554,42 +1321,35 @@ class Lawsuit(interactions.Extension):
                 ctx, "An unexpected error occurred. Please try again later."
             )
 
-    @interactions.component_callback("dismiss_*")
-    async def handle_dismiss(self, ctx: interactions.ComponentContext) -> None:
-        case_id: str = ctx.custom_id.removeprefix("dismiss_")
-        await self.process_case_action(ctx, CaseAction.DISMISS, case_id)
-
-    @interactions.component_callback("accept_*")
-    async def handle_accept(self, ctx: interactions.ComponentContext) -> None:
-        case_id: str = ctx.custom_id.removeprefix("accept_")
-        await self.process_case_action(ctx, CaseAction.REGISTER, case_id)
-
-    @interactions.component_callback("withdraw_*")
-    async def handle_withdraw(self, ctx: interactions.ComponentContext) -> None:
-        case_id: str = ctx.custom_id.removeprefix("withdraw_")
-        await self.process_case_action(ctx, CaseAction.WITHDRAW, case_id)
+    @interactions.component_callback("dismiss_*", "accept_*", "withdraw_*")
+    async def handle_case_actions(self, ctx: interactions.ComponentContext) -> None:
+        action, case_id = ctx.custom_id.split("_", 1)
+        await self.process_case_action(ctx, CaseAction[action.upper()], case_id)
 
     @interactions.component_callback("public_trial_*")
     async def handle_trial_privacy(self, ctx: interactions.ComponentContext) -> None:
         try:
-            remainder: str = ctx.custom_id.removeprefix("public_trial_")
-            is_public_str, case_id = remainder.split("_", maxsplit=1)
-            is_public: bool = is_public_str.lower() == "yes"
+            remainder = ctx.custom_id.removeprefix("public_trial_")
+            is_public_str, case_id = remainder.split("_", 1)
 
-            async with self.repository.case_lock_manager(case_id) as case:
-                if case is None:
+            async with self.repo.case_lock_manager(case_id) as case:
+                if not case:
                     logger.warning(f"Case {case_id} not found")
                     await self.view.send_error(ctx, "Case not found")
                     return
-
                 await self.create_trial_thread(
-                    ctx=ctx, case_id=case_id, case=case, is_public=is_public
+                    ctx=ctx,
+                    case_id=case_id,
+                    case=case,
+                    is_public=is_public_str.lower() == "yes",
                 )
                 logger.info(
                     "Trial privacy set",
-                    extra={"case_id": case_id, "is_public": is_public},
+                    extra={
+                        "case_id": case_id,
+                        "is_public": is_public_str.lower() == "yes",
+                    },
                 )
-
         except ValueError:
             logger.error(
                 "Invalid format", exc_info=True, extra={"custom_id": ctx.custom_id}
@@ -1606,24 +1366,17 @@ class Lawsuit(interactions.Extension):
 
     @interactions.component_callback("mute_*", "unmute_*")
     async def handle_user_mute(self, ctx: interactions.ComponentContext) -> None:
-        action_str: str
-        user_id_str: str
-        action_str, user_id_str = ctx.custom_id.split("_", maxsplit=1)
-
-        case_id: str | None = await self._validate_user_permissions(ctx)
-        if case_id is None:
+        action_str, user_id_str = ctx.custom_id.split("_", 1)
+        if not (case_id := await self._validate_user_permissions(ctx)):
             logger.warning("Case not found for channel")
             await self.view.send_error(ctx, "Associated case not found")
             return
-
         try:
-            action = UserAction(action_str)
-            target_id = int(user_id_str)
             await self.process_mute_action(
                 ctx=ctx,
                 case_id=case_id,
-                target_id=target_id,
-                mute=(action == UserAction.MUTE),
+                target_id=int(user_id_str),
+                mute=action_str == "mute",
             )
         except ValueError:
             logger.error(f"Invalid user ID: {user_id_str}")
@@ -1632,21 +1385,17 @@ class Lawsuit(interactions.Extension):
 
     @interactions.component_callback("pin_*", "delete_*")
     async def handle_message_action(self, ctx: interactions.ComponentContext) -> None:
-        action_str: str
-        message_id_str: str
-        action_str, message_id_str = ctx.custom_id.split("_", maxsplit=1)
-
-        case_id: str | None = await self._validate_user_permissions(ctx)
-        if case_id is None:
+        action_str, message_id_str = ctx.custom_id.split("_", 1)
+        if not (case_id := await self._validate_user_permissions(ctx)):
             logger.warning("Case not found for channel")
             await self.view.send_error(ctx, "Associated case not found")
             return
-
         try:
-            action = MessageAction(action_str)
-            target_id = int(message_id_str)
             await self.process_message_action(
-                ctx=ctx, case_id=case_id, target_id=target_id, action_type=action
+                ctx=ctx,
+                case_id=case_id,
+                target_id=int(message_id_str),
+                action_type=MessageAction(action_str),
             )
         except ValueError:
             logger.error(f"Invalid message ID: {message_id_str}")
@@ -1656,22 +1405,17 @@ class Lawsuit(interactions.Extension):
     @interactions.component_callback("approve_evidence_*", "reject_evidence_*")
     async def handle_evidence_action(self, ctx: interactions.ComponentContext) -> None:
         try:
-            action_str: str
-            remainder: str
-            action_str, remainder = ctx.custom_id.split("_evidence_", maxsplit=1)
-
-            case_id: str
-            user_id_str: str
-            case_id, user_id_str = remainder.split("_", maxsplit=1)
-
-            action = (
-                EvidenceAction.APPROVED
-                if action_str == "approve"
-                else EvidenceAction.REJECTED
-            )
-            user_id: int = int(user_id_str)
+            action_str, remainder = ctx.custom_id.split("_evidence_", 1)
+            case_id, user_id_str = remainder.split("_", 1)
             await self.process_judge_evidence_decision(
-                ctx=ctx, action=action, case_id=case_id, user_id=user_id
+                ctx=ctx,
+                action=(
+                    EvidenceAction.APPROVED
+                    if action_str == "approve"
+                    else EvidenceAction.REJECTED
+                ),
+                case_id=case_id,
+                user_id=int(user_id_str),
             )
         except ValueError:
             logger.error(f"Invalid format: {ctx.custom_id}")
@@ -1680,12 +1424,13 @@ class Lawsuit(interactions.Extension):
 
     @interactions.component_callback("end_trial_*")
     async def handle_end_trial(self, ctx: interactions.ComponentContext) -> None:
-        case_id: str = ctx.custom_id.removeprefix("end_trial_")
-        await self.process_case_action(ctx, CaseAction.CLOSE, case_id)
+        await self.process_case_action(
+            ctx, CaseAction.CLOSE, ctx.custom_id.removeprefix("end_trial_")
+        )
 
     # Command handlers
 
-    module_base: Final[interactions.SlashCommand] = interactions.SlashCommand(
+    module_base: interactions.SlashCommand = interactions.SlashCommand(
         name="lawsuit",
         description="Lawsuit management system",
     )
@@ -1697,97 +1442,49 @@ class Lawsuit(interactions.Extension):
     @interactions.check(user_is_judge)
     async def show_memory_allocations(self, ctx: interactions.SlashContext) -> None:
         try:
-            async with asyncio.timeout(10.0):
-                tracemalloc.start(25)
+            async with asyncio.timeout(5.0):
+                tracemalloc.start(50)
                 try:
                     snapshot = tracemalloc.take_snapshot()
-                    top_stats = snapshot.statistics("traceback")[:10]
+                    top_stats = sorted(
+                        snapshot.statistics("traceback"),
+                        key=lambda x: x.size,
+                        reverse=True,
+                    )[:10]
+                    chunks: list[str] = []
+                    current_chunk: list[str] = []
+                    current_length = 0
 
-                    stats_content = "\n".join(
-                        f"{stat.count:,} allocs | {stat.size/1024/1024:.2f} MiB | "
-                        f"{stat.avg_size/1024:.2f} KiB/alloc\n"
-                        f"{stat.traceback.format(limit=3)}"
-                        for stat in top_stats
-                    )
-                    content = f"```py\n{'-' * 50}\n{stats_content}\n{'-' * 50}\n```"
+                    for stat in top_stats:
+                        stat_content = (
+                            f"{stat.count:>8,d} allocs | {stat.size/1_048_576:>6.2f} MiB | "
+                            f"{stat.size/(stat.count or 1)/1024:>6.2f} KiB/alloc\n"
+                            f"{stat.traceback.format(limit=5)}\n"
+                        )
 
-                    await self.view.send_success(
-                        ctx,
-                        content,
-                    )
+                        if current_length + len(stat_content) + 6 > 4000:
+                            chunks.append("```py\n" + "".join(current_chunk) + "```")
+                            current_chunk = []
+                            current_length = 0
+
+                        current_chunk.append(stat_content)
+                        current_length += len(stat_content)
+
+                    if current_chunk:
+                        chunks.append("```py\n" + "".join(current_chunk) + "```")
+
+                    for chunk in chunks:
+                        await ctx.send(chunk)
+
                     logger.debug("Memory analysis completed successfully")
                 finally:
                     tracemalloc.stop()
-        except* Exception as e:
+        except* (Exception, asyncio.TimeoutError) as eg:
             logger.exception("Memory analysis failed", exc_info=True)
             await self.view.send_error(
                 ctx,
-                f"Analysis failed: {type(e).__name__}",
+                f"Analysis failed: {type(eg.__cause__).__name__} - {str(eg.__cause__)[:100]}",
             )
-
-    @module_base.subcommand(
-        "consistency",
-        sub_cmd_description="Perform a comprehensive data consistency verification",
-    )
-    @interactions.check(user_is_judge)
-    async def run_consistency_check(
-        self, ctx: Optional[interactions.SlashContext] = None
-    ) -> None:
-        async def perform_check() -> str:
-            async with asyncio.TaskGroup() as tg:
-                differences = await tg.create_task(self.verify_consistency())
-                return self.format_consistency_results(differences)
-
-        try:
-            if ctx:
-                await ctx.defer(ephemeral=True)
-
-            formatted_results = await asyncio.wait_for(
-                perform_check(),
-                timeout=30.0,
-            )
-
-            if ctx:
-                await self.view.send_success(
-                    ctx,
-                    f"```py\n{formatted_results}\n```",
-                )
-            else:
-                logger.info(
-                    "Automated consistency check results:\n%s",
-                    formatted_results,
-                    extra={"results": formatted_results},
-                )
-        except* Exception as eg:
-            match eg:
-                case asyncio.TimeoutError():
-                    error_msg = "Verification timed out after 30s"
-                case _:
-                    error_msg = f"Verification error: {type(eg).__name__}"
-
-            logger.exception(error_msg, exc_info=True)
-            if ctx:
-                await self.view.send_error(ctx, error_msg)
-
-    @staticmethod
-    def format_consistency_results(differences: Dict[str, Set[str]]) -> str:
-        """ """
-        try:
-            if not differences:
-                return "✓ All data consistency checks passed"
-
-            return "\n".join(
-                f"⚠️ {len(cases):,} cases {status}:\n" f"  • {', '.join(sorted(cases))}"
-                for status, cases in sorted(
-                    differences.items(),
-                    key=lambda x: len(x[1]),
-                    reverse=True,
-                )
-                if cases
-            )
-        except Exception as e:
-            logger.exception("Results formatting failed", exc_info=True)
-            raise ValueError("Failed to format results") from e
 
     @module_base.subcommand(
         "dispatch",
@@ -1798,8 +1495,11 @@ class Lawsuit(interactions.Extension):
         await ctx.defer(ephemeral=True)
         try:
             async with asyncio.timeout(5.0):
-                action_row = self.view.action_buttons_store
-                daily_proverb = self.view.select_daily_proverb()
+                action_row, daily_proverb = (
+                    self.view.action_buttons_store,
+                    self.view.select_daily_proverb(),
+                )
+
                 embed = await self.view.generate_embed(
                     title=daily_proverb,
                     description="Click below to file a lawsuit or appeal",
@@ -1817,19 +1517,22 @@ class Lawsuit(interactions.Extension):
                 logger.info(
                     "Lawsuit interface deployed",
                     extra={
-                        "user_id": ctx.author.id,
-                        "channel_id": ctx.channel_id,
-                        "message_id": message.id,
+                        k: v
+                        for k, v in {
+                            "user_id": ctx.author.id,
+                            "channel_id": ctx.channel_id,
+                            "message_id": message.id,
+                        }.items()
                     },
                 )
         except* Exception as eg:
-            match eg:
-                case HTTPException(status=404):
+            match type(eg.__cause__):
+                case HTTPException() as exc if exc.status == 404:
                     logger.warning("Interaction expired")
-                case HTTPException() as http_exc:
+                case HTTPException() as exc:
                     logger.error(
                         "HTTP error in lawsuit deployment: %s",
-                        http_exc.status,
+                        exc.status,
                         exc_info=True,
                     )
                 case _:
@@ -1837,10 +1540,7 @@ class Lawsuit(interactions.Extension):
                         "Lawsuit interface deployment failed",
                         exc_info=True,
                     )
-            await self.view.send_error(
-                ctx,
-                "Failed to deploy interface",
-            )
+            await self.view.send_error(ctx, "Failed to deploy interface")
 
     @module_base.subcommand(
         "role",
@@ -1852,11 +1552,8 @@ class Lawsuit(interactions.Extension):
         opt_type=interactions.OptionType.STRING,
         required=True,
         choices=[
-            interactions.SlashCommandChoice(
-                name=action.name.title(),
-                value=action.value,
-            )
-            for action in RoleAction
+            interactions.SlashCommandChoice(name=a.name.title(), value=a.value)
+            for a in RoleAction
         ],
     )
     @interactions.slash_option(
@@ -1881,8 +1578,7 @@ class Lawsuit(interactions.Extension):
     ) -> None:
         try:
             async with asyncio.timeout(5.0):
-                case_id = await self.find_case_number_by_channel_id(ctx.channel_id)
-                if not case_id:
+                if not (case_id := self.find_case_number_by_channel_id(ctx.channel_id)):
                     raise ValueError("No associated case found")
 
                 interaction_action = RoleAction(action.lower())
@@ -1894,29 +1590,35 @@ class Lawsuit(interactions.Extension):
                     user,
                 )
 
-                action_str = (
-                    "assigned to"
-                    if interaction_action == RoleAction.ASSIGN
-                    else "revoked from"
-                )
                 logger.info(
                     "Role management completed",
                     extra={
-                        "action": action_str,
-                        "role": role,
-                        "user_id": user.id,
-                        "case_id": case_id,
-                        "moderator_id": ctx.author.id,
+                        k: v
+                        for k, v in {
+                            "action": (
+                                "assigned to"
+                                if interaction_action == RoleAction.ASSIGN
+                                else "revoked from"
+                            ),
+                            "role": role,
+                            "user_id": user.id,
+                            "case_id": case_id,
+                            "moderator_id": ctx.author.id,
+                        }.items()
                     },
                 )
         except* Exception as eg:
-            match eg:
-                case ValueError():
-                    error_msg = "Invalid configuration"
-                case asyncio.TimeoutError():
-                    error_msg = "Operation timed out"
-                case _:
-                    error_msg = f"Unexpected error: {type(eg).__name__}"
+            error_msg = next(
+                (
+                    msg
+                    for t, msg in {
+                        ValueError: "Invalid configuration",
+                        asyncio.TimeoutError: "Operation timed out",
+                    }.items()
+                    if isinstance(eg.__cause__, t)
+                ),
+                f"Unexpected error: {type(eg.__cause__).__name__}",
+            )
 
             logger.exception(error_msg, exc_info=True)
             await self.view.send_error(ctx, error_msg)
@@ -1930,33 +1632,39 @@ class Lawsuit(interactions.Extension):
                 await self.view.send_error(ctx, "Only judges can manage messages.")
                 return
 
-            case_id = await self.find_case_number_by_channel_id(ctx.channel_id)
-            if not case_id:
+            if not (case_id := self.find_case_number_by_channel_id(ctx.channel_id)):
                 await self.view.send_error(
                     ctx, "This command can only be used in case threads."
                 )
                 return
 
-            buttons = self.create_message_management_buttons(ctx.target.id)
             await ctx.send(
                 "Select an action:",
-                components=[interactions.ActionRow(*buttons)],
+                components=[
+                    interactions.ActionRow(
+                        *self.create_message_management_buttons(ctx.target.id)
+                    )
+                ],
                 ephemeral=True,
             )
 
             logger.info(
                 "Message management menu opened",
                 extra={
-                    "case_id": case_id,
-                    "message_id": ctx.target.id,
-                    "user_id": ctx.author.id,
+                    k: v
+                    for k, v in {
+                        "case_id": case_id,
+                        "message_id": ctx.target.id,
+                        "user_id": ctx.author.id,
+                    }.items()
                 },
             )
 
-        except Exception:
+        except Exception as e:
             logger.exception(
                 "Failed to open message management menu",
                 extra={"message_id": ctx.target.id},
+                exc_info=e,
             )
             await self.view.send_error(
                 ctx, "Failed to load message management options."
@@ -1970,33 +1678,39 @@ class Lawsuit(interactions.Extension):
                 await self.view.send_error(ctx, "Only judges can manage users.")
                 return
 
-            case_id = await self.find_case_number_by_channel_id(ctx.channel_id)
-            if not case_id:
+            if not (case_id := self.find_case_number_by_channel_id(ctx.channel_id)):
                 await self.view.send_error(
                     ctx, "This command can only be used in case threads."
                 )
                 return
 
-            buttons = self.create_user_management_buttons(ctx.target.id)
             await ctx.send(
                 "Select an action:",
-                components=[interactions.ActionRow(*buttons)],
+                components=[
+                    interactions.ActionRow(
+                        *self.create_user_management_buttons(ctx.target.id)
+                    )
+                ],
                 ephemeral=True,
             )
 
             logger.info(
                 "User management menu opened",
                 extra={
-                    "case_id": case_id,
-                    "target_user_id": ctx.target.id,
-                    "user_id": ctx.author.id,
+                    k: v
+                    for k, v in {
+                        "case_id": case_id,
+                        "target_user_id": ctx.target.id,
+                        "user_id": ctx.author.id,
+                    }.items()
                 },
             )
 
-        except Exception:
+        except Exception as e:
             logger.exception(
                 "Failed to open user management menu",
                 extra={"target_user_id": ctx.target.id},
+                exc_info=e,
             )
             await self.view.send_error(ctx, "Failed to load user management options.")
             raise
@@ -2015,9 +1729,8 @@ class Lawsuit(interactions.Extension):
 
         try:
             async with asyncio.TaskGroup() as tg:
-                case_task = tg.create_task(self.repository.get_case_data(case_id))
-                guild_task = tg.create_task(self.bot.fetch_guild(self.config.GUILD_ID))
-                case, guild = await asyncio.gather(case_task, guild_task)
+                case = await tg.create_task(self.repo.get_case_data(case_id))
+                guild = await tg.create_task(self.bot.fetch_guild(self.config.GUILD_ID))
 
                 if not case:
                     logger.warning("Case ID '%s' not found.", case_id)
@@ -2028,11 +1741,10 @@ class Lawsuit(interactions.Extension):
                 logger.debug(
                     "Fetched member '%s' from guild '%s'.", member.id, guild.id
                 )
-
                 if handler := self.case_handlers.get(action):
                     await handler(ctx, case_id, case, member)
                     logger.info(
-                        "Successfully executed handler for action '%s' on case '%s'.",
+                        "Successfully executed handler for action '%s' on case '%s'",
                         action,
                         case_id,
                     )
@@ -2066,16 +1778,25 @@ class Lawsuit(interactions.Extension):
         )
 
         try:
-            if not await self.user_is_judge(user):
-                logger.warning(
-                    "User '%s' lacks judge role for case '%s'.", user.id, case_id
+            async with asyncio.TaskGroup() as tg:
+                judge_check = tg.create_task(self.user_is_judge(user))
+                if not await judge_check:
+                    logger.warning(
+                        "User '%s' lacks judge role for case '%s'.", user.id, case_id
+                    )
+                    await self.view.send_error(ctx, "Insufficient permissions.")
+                    return
+
+                await tg.create_task(self.add_judge_to_case(ctx, case_id))
+                logger.info(
+                    "User '%s' assigned as judge to case '%s'.", user.id, case_id
                 )
-                await self.view.send_error(ctx, "Insufficient permissions.")
-                return
 
-            await self.add_judge_to_case(ctx, case_id)
-            logger.info("User '%s' assigned as judge to case '%s'.", user.id, case_id)
-
+        except* (asyncio.TimeoutError, asyncio.CancelledError) as eg:
+            logger.error(
+                "Timeout in file case request for case ID '%s': %s", case_id, eg
+            )
+            await self.view.send_error(ctx, "Operation timed out. Please try again.")
         except* Exception as eg:
             logger.exception(
                 "Error handling file case request for case ID '%s': %s", case_id, eg
@@ -2101,9 +1822,10 @@ class Lawsuit(interactions.Extension):
         )
 
         try:
-            if not await self.user_has_permission_for_closure(
+            permission_check = await self.user_has_permission_for_closure(
                 ctx.author.id, case_id, member
-            ):
+            )
+            if not permission_check:
                 logger.warning(
                     "User '%s' lacks permissions to close case '%s'.",
                     ctx.author.id,
@@ -2112,18 +1834,16 @@ class Lawsuit(interactions.Extension):
                 await self.view.send_error(ctx, "Insufficient permissions.")
                 return
 
-            action_name = action.value.capitalize()
-            new_status = action.new_status
+            action_name: str = action.value.capitalize()
+            new_status: str = action.value
+            case_status = CaseStatus(new_status)
 
             async with asyncio.TaskGroup() as tg:
-                status_task = tg.create_task(
-                    self.update_case_status(case_id, case, new_status)
-                )
-                notify_task = tg.create_task(
-                    self.notify_case_closure(ctx, case_id, action_name)
-                )
-                save_task = tg.create_task(self.enqueue_case_file_save(case_id, case))
-                await asyncio.gather(status_task, notify_task, save_task)
+                tasks = [
+                    tg.create_task(self.update_case_status(case_id, case, case_status)),
+                    tg.create_task(self.notify_case_closure(ctx, case_id, action_name)),
+                    tg.create_task(self.enqueue_case_file_save(case_id, case)),
+                ]
 
             logger.info(
                 "Successfully closed case ID '%s' with action '%s' by user '%s'.",
@@ -2131,13 +1851,13 @@ class Lawsuit(interactions.Extension):
                 action_name,
                 ctx.author.id,
             )
+
         except* Exception as eg:
+            error_msg = f"Failed to close the case: {type(eg).__name__}"
             logger.exception(
                 "Error during case closure for case ID '%s': %s", case_id, eg
             )
-            await self.view.send_error(
-                ctx, f"Failed to close the case: {type(eg).__name__}"
-            )
+            await self.view.send_error(ctx, error_msg)
 
     async def update_case_status(
         self, case_id: str, case: Data, new_status: CaseStatus
@@ -2145,21 +1865,24 @@ class Lawsuit(interactions.Extension):
         logger.debug("Updating status of case ID '%s' to '%s'.", case_id, new_status)
         case.status = new_status
 
-        thread_ids = [tid for tid in (case.thread_id, case.trial_thread_id) if tid]
+        thread_ids = tuple(filter(None, (case.thread_id, case.trial_thread_id)))
         if not thread_ids:
             return
 
         try:
-            results = await asyncio.gather(
-                *(self.archive_thread(thread_id) for thread_id in thread_ids),
-                return_exceptions=True,
-            )
+            tasks = {
+                thread_id: asyncio.create_task(self.archive_thread(thread_id))
+                for thread_id in thread_ids
+            }
 
-            for thread_id, result in zip(thread_ids, results):
-                if isinstance(result, Exception):
-                    logger.error(f"Failed to archive thread {thread_id}: {result}")
-                else:
-                    logger.info(f"Successfully archived thread {thread_id}")
+            done, _ = await asyncio.wait(tasks.values())
+
+            for thread_id, task in tasks.items():
+                try:
+                    await task
+                    logger.info("Successfully archived thread %s", thread_id)
+                except Exception as e:
+                    logger.error("Failed to archive thread %s: %s", thread_id, e)
 
         except* Exception as eg:
             logger.exception(
@@ -2174,15 +1897,18 @@ class Lawsuit(interactions.Extension):
 
         try:
             async with asyncio.TaskGroup() as tg:
-                notify_task = tg.create_task(
-                    self.notify_case_participants(case_id, notification)
-                )
-                success_task = tg.create_task(
-                    self.view.send_success(
-                        ctx, f"Case number {case_id} successfully {action_name}."
-                    )
-                )
-                await asyncio.gather(notify_task, success_task)
+                tasks = [
+                    tg.create_task(
+                        self.notify_case_participants(case_id, notification)
+                    ),
+                    tg.create_task(
+                        self.view.send_success(
+                            ctx, f"Case number {case_id} successfully {action_name}."
+                        )
+                    ),
+                ]
+                await next(iter(tasks))
+                await tasks[1]
 
             logger.info(
                 "Successfully notified participants and user about closure of case ID '%s'.",
@@ -2193,7 +1919,7 @@ class Lawsuit(interactions.Extension):
                 "Error notifying about closure of case ID '%s': %s", case_id, eg
             )
             await self.view.send_error(
-                ctx, f"Failed to notify participants: {type(eg).__name__}"
+                ctx, f"Failed to notify participants: {eg.__class__.__name__}"
             )
 
     async def handle_accept_case_request(
@@ -2209,10 +1935,17 @@ class Lawsuit(interactions.Extension):
             if not await self.is_user_assigned_to_case(
                 ctx.author.id, case_id, role="judges"
             ):
-                logger.warning(
-                    "User '%s' is not assigned to case ID '%s'.", ctx.author.id, case_id
-                )
-                await self.view.send_error(ctx, "Insufficient permissions.")
+                async with asyncio.TaskGroup() as tg:
+                    tg.create_task(
+                        logger.warning(
+                            "User '%s' is not assigned to case ID '%s'.",
+                            ctx.author.id,
+                            case_id,
+                        )
+                    )
+                    tg.create_task(
+                        self.view.send_error(ctx, "Insufficient permissions.")
+                    )
                 return
 
             async with asyncio.TaskGroup() as tg:
@@ -2220,24 +1953,34 @@ class Lawsuit(interactions.Extension):
                     self.view.generate_embed(title="Public or Private Trial")
                 )
                 buttons = self.view.create_trial_privacy_buttons(case_id)
-                embed = await embed_task
 
                 await ctx.send(
-                    embeds=[embed], components=[interactions.ActionRow(*buttons)]
+                    embeds=[await embed_task],
+                    components=[interactions.ActionRow(*buttons)],
                 )
 
-            logger.info(
-                "Sent trial privacy options for case ID '%s' to user '%s'.",
-                case_id,
-                ctx.author.id,
-            )
+                tg.create_task(
+                    logger.info(
+                        "Sent trial privacy options for case ID '%s' to user '%s'.",
+                        case_id,
+                        ctx.author.id,
+                    )
+                )
+
         except* Exception as eg:
-            logger.exception(
-                "Error handling accept case request for case ID '%s': %s", case_id, eg
-            )
-            await self.view.send_error(
-                ctx, f"Failed to process request: {type(eg).__name__}"
-            )
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(
+                    logger.exception(
+                        "Error handling accept case request for case ID '%s': %s",
+                        case_id,
+                        eg,
+                    )
+                )
+                tg.create_task(
+                    self.view.send_error(
+                        ctx, f"Failed to process request: {type(eg).__name__}"
+                    )
+                )
 
     async def end_trial(self, ctx: interactions.ComponentContext) -> None:
         logger.debug("Handling end trial action with custom ID '%s'.", ctx.custom_id)
@@ -2262,7 +2005,6 @@ class Lawsuit(interactions.Extension):
     async def add_members_to_thread(
         thread: interactions.GuildText, member_ids: FrozenSet[int]
     ) -> None:
-
         async def _add_member(member_id: int) -> None:
             try:
                 async with asyncio.timeout(5.0):
@@ -2276,24 +2018,6 @@ class Lawsuit(interactions.Extension):
                             "guild_id": thread.guild.id,
                         },
                     )
-            except* (NotFound, Forbidden) as eg:
-                match eg:
-                    case NotFound():
-                        logger.warning(
-                            "Member not found in guild",
-                            extra={
-                                "member_id": member_id,
-                                "guild_id": thread.guild.id,
-                            },
-                        )
-                    case Forbidden():
-                        logger.error(
-                            "Permission denied adding member",
-                            extra={
-                                "member_id": member_id,
-                                "thread_id": thread.id,
-                            },
-                        )
             except* Exception as eg:
                 logger.exception(
                     "Critical error adding member",
@@ -2305,8 +2029,10 @@ class Lawsuit(interactions.Extension):
                 )
 
         async with asyncio.TaskGroup() as tg:
-            tasks = [tg.create_task(_add_member(mid)) for mid in member_ids]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            [tg.create_task(_add_member(mid)) for mid in member_ids]
+            await asyncio.wait(
+                [t for t in tg._tasks], return_when=asyncio.ALL_COMPLETED
+            )
 
     async def add_participants_to_thread(
         self, thread: interactions.GuildText, case: Data
@@ -2351,7 +2077,6 @@ class Lawsuit(interactions.Extension):
             )
             raise
 
-    @final
     async def add_judge_to_case(
         self, ctx: interactions.ComponentContext, case_id: str
     ) -> None:
@@ -2361,7 +2086,11 @@ class Lawsuit(interactions.Extension):
         )
 
         try:
-            async with self.repository.case_lock_manager(case_id) as locked_case:
+            async with self.repo.case_lock_manager(case_id) as locked_case:
+                if not locked_case:
+                    await self.view.send_error(ctx, "Case not found")
+                    return
+
                 if len(locked_case.judges) >= self.config.MAX_JUDGES_PER_LAWSUIT:
                     await self.view.send_error(
                         ctx,
@@ -2378,26 +2107,26 @@ class Lawsuit(interactions.Extension):
                 )
 
                 async with asyncio.TaskGroup() as tg:
-                    update_task = tg.create_task(
-                        self.repository.update_case(case_id, judges=new_judges)
-                    )
                     notification = f"{ctx.author.display_name} assigned as judge to Case #{case_id}"
 
-                    notify_task = tg.create_task(
-                        self.notify_case_participants(case_id, notification)
-                    )
-                    perms_task = tg.create_task(
-                        self._update_thread_permissions(case_id, ctx.author.id)
-                    )
-                    response_task = tg.create_task(
-                        self.view.send_success(
-                            ctx, f"Added as judge to Case #{case_id}"
-                        )
+                    tasks = (
+                        tg.create_task(
+                            self.repo.update_case(case_id, judges=new_judges)
+                        ),
+                        tg.create_task(
+                            self.notify_case_participants(case_id, notification)
+                        ),
+                        tg.create_task(
+                            self._update_thread_permissions(case_id, ctx.author.id)
+                        ),
+                        tg.create_task(
+                            self.view.send_success(
+                                ctx, f"Added as judge to Case #{case_id}"
+                            )
+                        ),
                     )
 
-                    await asyncio.gather(
-                        update_task, notify_task, perms_task, response_task
-                    )
+                    await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
 
         except* ValueError as eg:
             logger.error(
@@ -2413,73 +2142,53 @@ class Lawsuit(interactions.Extension):
             await self.view.send_error(ctx, "Critical error occurred")
             raise
 
-    @final
     async def _update_thread_permissions(self, case_id: str, judge_id: int) -> None:
         try:
             async with asyncio.timeout(5.0):
-                case = await self.repository.get_case_data(case_id)
+                case = await self.repo.get_case_data(case_id)
 
                 permissions = (
                     interactions.Permissions.VIEW_CHANNEL
                     | interactions.Permissions.SEND_MESSAGES
                 )
 
-                async def _update_thread_perms(thread_id: int) -> None:
-                    thread = await self.bot.fetch_channel(thread_id)
-                    await thread.edit_permission(
-                        interactions.PermissionOverwrite(
-                            id=interactions.Snowflake(judge_id),
-                            allow=permissions,
-                            deny=None,
-                            type=interactions.OverwriteType.MEMBER,
-                        ),
-                        reason=f"Adding judge {judge_id} to case {case_id}",
-                    )
-                    logger.debug(
-                        "Thread permissions updated",
-                        extra={
-                            "thread_id": thread_id,
-                            "judge_id": judge_id,
-                        },
-                    )
-
-                thread_ids = tuple(
-                    tid for tid in (case.thread_id, case.trial_thread_id) if tid
+                permission_overwrite = interactions.PermissionOverwrite(
+                    id=interactions.Snowflake(judge_id),
+                    allow=permissions,
+                    deny=None,
+                    type=interactions.OverwriteType.MEMBER,
                 )
 
-                if not thread_ids:
-                    logger.warning(
-                        "No threads found",
-                        extra={"case_id": case_id},
+                thread_ids = {
+                    tid
+                    for tid in (
+                        getattr(case, "thread_id", None),
+                        getattr(case, "trial_thread_id", None),
                     )
+                    if tid is not None
+                }
+
+                if not thread_ids:
+                    logger.warning("No threads found", extra={"case_id": case_id})
                     return
 
                 async with asyncio.TaskGroup() as tg:
-                    tasks = [
-                        tg.create_task(_update_thread_perms(tid)) for tid in thread_ids
-                    ]
-                    await asyncio.gather(*tasks)
+                    for thread_id in thread_ids:
+                        tg.create_task(
+                            (await self.bot.fetch_channel(thread_id)).edit_permission(
+                                permission_overwrite,
+                                reason=f"Adding judge {judge_id} to case {case_id}",
+                            )
+                        )
+                        logger.debug(
+                            "Thread permissions updated",
+                            extra={"thread_id": thread_id, "judge_id": judge_id},
+                        )
 
-        except* (NotFound, Forbidden) as eg:
-            match eg:
-                case NotFound():
-                    logger.error(
-                        "Thread not found",
-                        extra={"case_id": case_id},
-                    )
-                case Forbidden():
-                    logger.error(
-                        "Permission denied",
-                        extra={"case_id": case_id},
-                    )
         except* Exception as eg:
             logger.exception(
                 "Critical permission update error",
-                extra={
-                    "case_id": case_id,
-                    "judge_id": judge_id,
-                    "error": str(eg),
-                },
+                extra={"case_id": case_id, "judge_id": judge_id, "error": str(eg)},
             )
             raise
 
@@ -2492,40 +2201,43 @@ class Lawsuit(interactions.Extension):
         target_id: int,
         mute: bool,
     ) -> None:
-        action_str = "muted" if mute else "unmuted"
+        action_str = ("un" * (not mute)) + "muted"
 
-        async with self.repository.case_lock_manager(case_id):
-            case = await self.repository.get_case_data(case_id)
-            if not case:
+        async with self.repo.case_lock_manager(case_id):
+            case = await self.repo.get_case_data(case_id)
+            if case is None:
                 raise ValueError(f"Case {case_id} not found")
 
             is_muted = target_id in case.mute_list
-
-            if (mute and is_muted) or (not mute and not is_muted):
+            if is_muted == mute:
                 await self.view.send_error(
                     ctx, f"User <@{target_id}> is already {action_str}."
                 )
                 return
 
-            updated_mute_list = set(case.mute_list)
-            if mute:
-                updated_mute_list.add(target_id)
-            else:
-                updated_mute_list.discard(target_id)
-
-            await self.repository.update_case(
-                case_id, mute_list=tuple(sorted(updated_mute_list))
+            updated_mute_list = frozenset(
+                {*case.mute_list, target_id}
+                if mute
+                else {x for x in case.mute_list if x != target_id}
             )
 
-            await asyncio.gather(
-                self.view.send_success(
-                    ctx, f"User <@{target_id}> has been {action_str}."
-                ),
-                self.notify_case_participants(
-                    case_id,
-                    f"User <@{target_id}> has been {action_str} by <@{ctx.author.id}>.",
-                ),
-            )
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(
+                    self.repo.update_case(
+                        case_id, mute_list=tuple(sorted(updated_mute_list))
+                    )
+                )
+                tg.create_task(
+                    self.view.send_success(
+                        ctx, f"User <@{target_id}> has been {action_str}."
+                    )
+                )
+                tg.create_task(
+                    self.notify_case_participants(
+                        case_id,
+                        f"User <@{target_id}> has been {action_str} by <@{ctx.author.id}>.",
+                    )
+                )
 
     async def process_message_action(
         self,
@@ -2535,31 +2247,39 @@ class Lawsuit(interactions.Extension):
         action_type: MessageAction,
     ) -> None:
         try:
-            channel = await self.bot.fetch_channel(ctx.channel_id)
-            if not channel:
-                raise ValueError(f"Channel {ctx.channel_id} not found")
+            async with asyncio.TaskGroup() as tg:
+                channel_task = tg.create_task(self.bot.fetch_channel(ctx.channel_id))
+                channel = await channel_task
+                if not channel:
+                    raise ValueError(f"Channel {ctx.channel_id} not found")
+                message_task = tg.create_task(channel.fetch_message(target_id))
+                message = await message_task
+                if not message:
+                    raise ValueError(f"Message {target_id} not found")
 
-            message = await channel.fetch_message(target_id)
-            if not message:
-                raise ValueError(f"Message {target_id} not found")
+            action_map = {
+                MessageAction.PIN.value: (message.pin, "ned"),
+                MessageAction.DELETE.value: (message.delete, "d"),
+            }
 
-            match action_type:
-                case MessageAction.PIN.value:
-                    await message.pin()
-                    action_str = MessageAction.PIN.value + "ned"
-                case MessageAction.DELETE.value:
-                    await message.delete()
-                    action_str = MessageAction.DELETE.value + "d"
-                case _:
-                    raise ValueError(f"Invalid action_type: {action_type}")
+            try:
+                action_func, suffix = action_map[action_type]
+            except KeyError:
+                raise ValueError(f"Invalid action_type: {action_type}")
 
-            await asyncio.gather(
-                self.view.send_success(ctx, f"Message has been {action_str}."),
-                self.notify_case_participants(
-                    case_id,
-                    f"A message has been {action_str} by <@{ctx.author.id}> in case {case_id}.",
-                ),
-            )
+            action_str = f"{action_type}{suffix}"
+            await action_func()
+
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(
+                    self.view.send_success(ctx, f"Message has been {action_str}.")
+                )
+                tg.create_task(
+                    self.notify_case_participants(
+                        case_id,
+                        f"A message has been {action_str} by <@{ctx.author.id}> in case {case_id}.",
+                    )
+                )
 
         except NotFound:
             logger.warning(
@@ -2599,7 +2319,7 @@ class Lawsuit(interactions.Extension):
         await self._send_dm_with_fallback(user_id, embed=embed)
 
     async def notify_case_participants(self, case_id: str, message: str) -> None:
-        case = await self.repository.get_case_data(case_id)
+        case = await self.repo.get_case_data(case_id)
         if not case:
             logger.warning(
                 "Case %s not found when attempting to notify participants", case_id
@@ -2621,7 +2341,7 @@ class Lawsuit(interactions.Extension):
         )
 
     async def notify_judges_of_new_evidence(self, case_id: str, user_id: int) -> None:
-        case = await self.repository.get_case_data(case_id)
+        case = await self.repo.get_case_data(case_id)
         if not case:
             logger.warning("Case %s not found for evidence notification", case_id)
             return
@@ -2665,7 +2385,7 @@ class Lawsuit(interactions.Extension):
                 case_id,
             )
             return
-        case = await self.repository.get_case_data(case_id)
+        case = await self.repo.get_case_data(case_id)
         if not case or not case.thread_id:
             logger.warning(
                 "Case %s does not have an associated thread for notifications", case_id
@@ -2718,14 +2438,22 @@ class Lawsuit(interactions.Extension):
         user_ids: frozenset[int],
         notification_func: Callable[[int], Awaitable[None]],
     ) -> None:
-        tasks = [
-            asyncio.create_task(
-                self._notify_user_with_handling(user_id, notification_func),
-                name=f"notify_user_{user_id}",
-            )
-            for user_id in user_ids
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        async with asyncio.TaskGroup() as tg:
+            tasks = {
+                user_id: tg.create_task(
+                    self._notify_user_with_handling(user_id, notification_func),
+                    name=f"notify_user_{user_id}",
+                )
+                for user_id in user_ids
+            }
+            try:
+                await next(iter(tasks.values()))
+                await asyncio.wait(
+                    [task for task in tasks.values()][1:],
+                    return_when=asyncio.ALL_COMPLETED,
+                )
+            except* Exception:
+                pass
 
     @staticmethod
     async def _notify_user_with_handling(
@@ -2776,7 +2504,7 @@ class Lawsuit(interactions.Extension):
         user: interactions.User,
     ) -> None:
         async def validate_and_get_case_data() -> Data:
-            fetched_case_data = await self.repository.get_case(case_id)
+            fetched_case_data = await self.repo.get_case_data(case_id)
             if not fetched_case_data:
                 raise ValueError(f"Case `{case_id}` not found.")
             return fetched_case_data
@@ -2823,12 +2551,14 @@ class Lawsuit(interactions.Extension):
                     await validate_user_permissions()
                     valid_role = get_valid_role()
 
-                    updated_roles = fetched_case.roles.copy()
+                    updated_roles = {
+                        role: set(users) for role, users in fetched_case.roles.items()
+                    }
                     action_str, preposition = assign_or_revoke_role(
                         updated_roles, valid_role
                     )
 
-                    await self.repository.update_case(case_id, roles=updated_roles)
+                    await self.repo.update_case(case_id, roles=updated_roles)
 
                     notification_message = (
                         f"<@{ctx.author.id}> has {action_str.lower()} the role of "
@@ -2890,12 +2620,6 @@ class Lawsuit(interactions.Extension):
                             file_name=filename,
                             description=f"Evidence attachment for {filename}",
                         )
-        except* aiohttp.ClientResponseError as eg:
-            logger.warning(
-                "Failed to fetch attachment: HTTP %d",
-                eg.status,
-                extra={"url": url, "filename": filename},
-            )
         except* asyncio.TimeoutError:
             logger.error(
                 "Timeout fetching attachment",
@@ -2939,7 +2663,7 @@ class Lawsuit(interactions.Extension):
             user_id = int(match["user_id"])
             await self.process_judge_evidence_decision(
                 ctx=ctx,
-                action=match["action"],
+                action=EvidenceAction[match["action"].upper()],
                 case_id=match["case_id"],
                 user_id=user_id,
             )
@@ -2987,7 +2711,7 @@ class Lawsuit(interactions.Extension):
             update_success = True
             try:
                 async with asyncio.timeout(5.0):
-                    await self.repository.update_case(
+                    await self.repo.update_case(
                         case_id,
                         evidence_queue=case.evidence_queue,
                         **{evidence_list_attr: evidence_list},
@@ -3069,23 +2793,21 @@ class Lawsuit(interactions.Extension):
                 async with asyncio.TaskGroup() as tg:
                     files = [
                         file
-                        for file in await asyncio.gather(
-                            *(
-                                tg.create_task(
-                                    self.fetch_attachment_as_file(
-                                        {"url": att.url, "filename": att.filename}
-                                    )
+                        for file in [
+                            await tg.create_task(
+                                self.fetch_attachment_as_file(
+                                    {"url": att.url, "filename": att.filename}
                                 )
-                                for att in evidence.attachments
                             )
-                        )
+                            for att in evidence.attachments
+                        ]
                         if file is not None
                     ]
 
                 await trial_thread.send(content=content, files=files)
                 await self.view.send_success(ctx, "Evidence published to trial thread")
 
-        except* HTTPException:
+        except* HTTPException as eg:
             logger.error(
                 "HTTP error publishing evidence",
                 extra={"case_id": case.id, "user_id": evidence.user_id},
@@ -3217,7 +2939,7 @@ class Lawsuit(interactions.Extension):
 
         try:
             async with asyncio.timeout(5.0):
-                if case := await self.repository.get_case(case_id):
+                if case := await self.repo.get_case_data(case_id):
                     if message.author.id in case.mute_list:
                         await message.delete()
                         logger.info(
@@ -3285,7 +3007,7 @@ class Lawsuit(interactions.Extension):
         async with contextlib.AsyncExitStack() as stack:
             try:
                 await stack.enter_async_context(self.case_lock_manager(case_id))
-                case = await self.repository.get_case(case_id)
+                case = await self.repo.get_case_data(case_id)
 
                 if not case:
                     raise ValueError(f"Case {case_id} not found")
@@ -3296,7 +3018,7 @@ class Lawsuit(interactions.Extension):
                 updated_queue = [*case.evidence_queue, evidence]
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(
-                        self.repository.update_case(
+                        self.repo.update_case(
                             case_id,
                             evidence_queue=updated_queue,
                         )
@@ -3379,7 +3101,6 @@ class Lawsuit(interactions.Extension):
             else True
         )
 
-    @functools.lru_cache(maxsize=1024, typed=True)
     def get_role_check(
         self,
         role: str,
@@ -3402,7 +3123,7 @@ class Lawsuit(interactions.Extension):
         case_id: str,
         role: str,
     ) -> bool:
-        case = await self.repository.get_case(case_id)
+        case = await self.repo.get_case_data(case_id)
         if not case:
             logger.error("Case '%s' not found", case_id)
             return False
@@ -3413,16 +3134,11 @@ class Lawsuit(interactions.Extension):
         self,
         user_id: int,
     ) -> bool:
-
-        async def check_case(case: Data) -> bool:
-            return case.plaintiff_id == user_id and case.status != CaseStatus.CLOSED
-
-        tasks = [
-            asyncio.create_task(asyncio.to_thread(check_case, case))
+        return any(
+            Data.parse_obj(case).plaintiff_id == user_id
+            and Data.parse_obj(case).status != CaseStatus.CLOSED
             for case in self.cached_cases.values()
-        ]
-        results = await asyncio.gather(*tasks)
-        return any(results)
+        )
 
     # Helper methods
 
@@ -3459,9 +3175,9 @@ class Lawsuit(interactions.Extension):
     @staticmethod
     def sanitize_user_input(text: str, *, max_length: int = 2000) -> str:
 
-        allowed_tags: Final[frozenset[str]] = frozenset()
-        allowed_attributes: Final[Dict[str, frozenset[str]]] = {}
-        whitespace_pattern: Final[re.Pattern] = re.compile(r"\s+")
+        allowed_tags: frozenset[str] = frozenset()
+        allowed_attributes: Dict[str, frozenset[str]] = {}
+        whitespace_pattern: re.Pattern = re.compile(r"\s+")
 
         cleaner = functools.partial(
             bleach.clean,
@@ -3570,47 +3286,44 @@ class Lawsuit(interactions.Extension):
     async def setup_mediation_thread(self, case_id: str, case: Data) -> bool:
         try:
             async with asyncio.timeout(15.0):
-                async with asyncio.TaskGroup() as tg:
-                    channel_task = tg.create_task(self.courtroom_channel)
-                    guild_task = tg.create_task(
-                        self.bot.fetch_guild(self.config.GUILD_ID)
+                channel = await self.bot.fetch_channel(self.config.COURTROOM_CHANNEL_ID)
+                guild = await self.bot.fetch_guild(self.config.GUILD_ID)
+
+                if not guild:
+                    logger.error(
+                        "Guild not found", extra={"guild_id": self.config.GUILD_ID}
                     )
+                    return False
 
-                    channel, guild = await asyncio.gather(channel_task, guild_task)
+                thread = await self.create_mediation_thread(channel, case_id)
+                judges = await self.get_judges(guild)
 
-                    if not guild:
-                        logger.error(
-                            "Guild not found", extra={"guild_id": self.config.GUILD_ID}
-                        )
-                        return False
+                participants = frozenset(
+                    {case.plaintiff_id, case.defendant_id}.union(judges)
+                )
 
-                    thread = await self.create_mediation_thread(channel, case_id)
-
-                    setup_tasks = [
+                async with asyncio.TaskGroup() as tg:
+                    tasks = [
                         tg.create_task(self.send_case_summary(thread, case_id, case)),
                         tg.create_task(
                             self.update_case_with_thread(case_id, thread.id)
                         ),
+                        tg.create_task(
+                            self.add_members_to_thread(thread, participants)
+                        ),
                     ]
+                    await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
 
-                    judges = await self.get_judges(guild)
-                    participants = frozenset(
-                        {case.plaintiff_id, case.defendant_id} | judges
-                    )
+                logger.info(
+                    "Mediation thread setup completed", extra={"case_id": case_id}
+                )
+                return True
 
-                    await self.add_members_to_thread(thread, participants)
-                    await asyncio.gather(*setup_tasks)
-
-                    logger.info(
-                        "Mediation thread setup completed", extra={"case_id": case_id}
-                    )
-                    return True
-
-        except Exception:
+        except Exception as e:
             logger.exception(
-                "Mediation thread setup failed",
-                extra={"case_id": case_id},
+                "Mediation thread setup failed", extra={"case_id": case_id}
             )
+            raise
         return False
 
     async def send_case_summary(
@@ -3646,7 +3359,7 @@ class Lawsuit(interactions.Extension):
     async def update_case_with_thread(self, case_id: str, thread_id: int) -> bool:
         try:
             async with asyncio.timeout(5.0):
-                await self.repository.update_case(case_id, thread_id=thread_id)
+                await self.repo.update_case(case_id, thread_id=thread_id)
                 logger.info(
                     "Case updated with thread",
                     extra={"case_id": case_id, "thread_id": thread_id},
@@ -3671,7 +3384,7 @@ class Lawsuit(interactions.Extension):
         channel: interactions.GuildText,
         case_id: str,
     ) -> interactions.GuildText:
-        thread_name: Final[str] = f"第{case_id}号调解室"
+        thread_name: str = f"第{case_id}号调解室"
 
         try:
             async with asyncio.timeout(5.0):
@@ -3703,7 +3416,6 @@ class Lawsuit(interactions.Extension):
             raise
 
     @staticmethod
-    @functools.lru_cache(maxsize=1024, typed=True)
     def create_case_id(length: int = 6) -> str:
         if not isinstance(length, int) or length <= 0:
             raise ValueError("Length must be a positive integer")
@@ -3718,13 +3430,13 @@ class Lawsuit(interactions.Extension):
         data: Dict[str, str],
         defendant_id: int,
     ) -> Tuple[Optional[str], Optional[Data]]:
-        result = (None, None)
+        result: Tuple[Optional[str], Optional[Data]] = (None, None)
         try:
             async with asyncio.timeout(10.0):
                 case_id: str = self.create_case_id()
                 case: Data = await self.create_case_data(ctx, data, defendant_id)
 
-                await self.repository.persist_case(case_id, case)
+                await self.repo.persist_case(case_id, case)
 
                 logger.info(
                     "Created new case",
@@ -3776,7 +3488,7 @@ class Lawsuit(interactions.Extension):
     async def create_new_chat_thread(
         channel: interactions.GuildText,
     ) -> interactions.ThreadChannel:
-        thread_name: Final[str] = "聊天室"
+        thread_name: str = "聊天室"
 
         try:
             async with asyncio.timeout(5.0):
@@ -3806,11 +3518,9 @@ class Lawsuit(interactions.Extension):
     ) -> interactions.Embed:
         try:
             async with asyncio.timeout(5.0):
-                guild_id: Final[int] = thread.guild.id
-                thread_id: Final[int] = thread.id
-                jump_url: Final[str] = (
-                    f"https://discord.com/channels/{guild_id}/{thread_id}"
-                )
+                guild_id: int = thread.guild.id
+                thread_id: int = thread.id
+                jump_url: str = f"https://discord.com/channels/{guild_id}/{thread_id}"
 
                 message = f"The lawsuit and appeal buttons have been sent to this channel. The chat room thread is ready: [Jump to Thread]({jump_url})."
 
@@ -3839,28 +3549,25 @@ class Lawsuit(interactions.Extension):
         case: Data,
         is_public: bool,
     ) -> None:
-        thread_type: Final[interactions.ChannelType] = (
+        thread_type = (
             interactions.ChannelType.GUILD_PUBLIC_THREAD
             if is_public
             else interactions.ChannelType.GUILD_PRIVATE_THREAD
         )
-        visibility: Final[str] = "publicly" if is_public else "privately"
-        thread_name: Final[str] = (
+        visibility = "publicly" if is_public else "privately"
+        thread_name = (
             f"Case #{case_id} {'Public' if is_public else 'Private'} Trial Chamber"
         )
 
         try:
             async with asyncio.timeout(10.0):
                 async with asyncio.TaskGroup() as tg:
-                    courtroom_task = tg.create_task(
+                    courtroom_channel = await tg.create_task(
                         self.bot.fetch_channel(self.config.COURTROOM_CHANNEL_ID)
                     )
-                    allowed_roles_task = tg.create_task(
+                    allowed_roles = await tg.create_task(
                         self.get_allowed_roles(ctx.guild)
                     )
-
-                    courtroom_channel = await courtroom_task
-                    allowed_roles = await allowed_roles_task
 
                     trial_thread = await courtroom_channel.create_thread(
                         name=thread_name,
@@ -3872,11 +3579,10 @@ class Lawsuit(interactions.Extension):
                     case.trial_thread_id = trial_thread.id
                     case.allowed_roles = allowed_roles
 
-                    embed_task = tg.create_task(
+                    embed = await tg.create_task(
                         self.view.create_summary_embed(case_id, case)
                     )
                     end_trial_button = self.view.create_end_trial_button(case_id)
-                    embed = await embed_task
 
                     await trial_thread.send(
                         embeds=[embed],
@@ -3889,17 +3595,22 @@ class Lawsuit(interactions.Extension):
                             trial_thread,
                         )
 
-                    await asyncio.gather(
-                        self.view.send_success(
-                            ctx,
-                            f"Case #{case_id} will be tried {visibility}.",
-                        ),
-                        self.notify_case_participants(
-                            case_id,
-                            f"Case #{case_id} will be tried {visibility}.",
-                        ),
-                        self.add_members_to_thread(trial_thread, case.judges),
-                    )
+                    async with asyncio.TaskGroup() as notify_tg:
+                        notify_tg.create_task(
+                            self.view.send_success(
+                                ctx,
+                                f"Case #{case_id} will be tried {visibility}.",
+                            )
+                        )
+                        notify_tg.create_task(
+                            self.notify_case_participants(
+                                case_id,
+                                f"Case #{case_id} will be tried {visibility}.",
+                            )
+                        )
+                        notify_tg.create_task(
+                            self.add_members_to_thread(trial_thread, case.judges)
+                        )
 
                 logger.info(
                     "Created trial thread",
@@ -3941,7 +3652,7 @@ class Lawsuit(interactions.Extension):
 
     @staticmethod
     async def get_allowed_roles(guild: interactions.Guild) -> frozenset[int]:
-        allowed_role_names: Final[frozenset[str]] = frozenset(
+        allowed_role_names: frozenset[str] = frozenset(
             {
                 "Prosecutor",
                 "Private Prosecutor",
@@ -3964,7 +3675,6 @@ class Lawsuit(interactions.Extension):
         )
         return allowed_roles
 
-    @functools.lru_cache(maxsize=1)
     async def get_judges(self, guild: interactions.Guild) -> frozenset[int]:
         judge_role = guild.get_role(self.config.JUDGE_ROLE_ID)
         if not judge_role:
@@ -3974,20 +3684,25 @@ class Lawsuit(interactions.Extension):
             )
             return frozenset()
 
-        async with asyncio.TaskGroup():
-            members = await guild.fetch_members(limit=None)
+        try:
             judges = frozenset(
                 member.id
-                for member in members
+                for member in judge_role.members
                 if self.config.JUDGE_ROLE_ID in member.role_ids
             )
 
-        logger.debug(
-            "Retrieved judges", extra={"judge_count": len(judges), "guild_id": guild.id}
-        )
-        return judges
+            logger.debug(
+                "Retrieved judges",
+                extra={"judge_count": len(judges), "guild_id": guild.id},
+            )
+            return judges
 
-    @functools.cached_property
+        except Exception as e:
+            logger.exception(
+                "Failed to fetch judges", extra={"guild_id": guild.id, "error": str(e)}
+            )
+            return frozenset()
+
     async def courtroom_channel(self) -> interactions.GuildText:
         channel = await self.bot.fetch_channel(self.config.COURTROOM_CHANNEL_ID)
 
@@ -4026,13 +3741,12 @@ class Lawsuit(interactions.Extension):
             logger.debug("Found existing chat thread", extra={"thread_id": thread.id})
         return thread
 
-    @functools.cached_property
     def case_data_cache(self) -> cachetools.TTLCache[str, Optional[Data]]:
         return cachetools.TTLCache(maxsize=1024, ttl=60)
 
     async def get_case(self, case_id: str) -> Optional[Data]:
         if case_id not in self.case_data_cache:
-            case = await self.repository.get_case(case_id)
+            case = await self.repo.get_case_data(case_id)
             self.case_data_cache[case_id] = case
             logger.debug("Case retrieved from repository", extra={"case_id": case_id})
         else:
@@ -4040,9 +3754,9 @@ class Lawsuit(interactions.Extension):
             logger.debug("Case retrieved from cache", extra={"case_id": case_id})
         return case
 
-    @functools.lru_cache(maxsize=1024)
     async def get_user_active_case_number(self, user_id: int) -> Optional[str]:
-        for case_id, case in self.cached_cases.items():
+        for case_id, case_data in self.cached_cases.items():
+            case = Data.parse_obj(case_data)
             if (
                 user_id in {case.plaintiff_id, case.defendant_id}
                 and case.status != CaseStatus.CLOSED
@@ -4056,9 +3770,9 @@ class Lawsuit(interactions.Extension):
         logger.debug("No active case found for user", extra={"user_id": user_id})
         return None
 
-    @functools.lru_cache(maxsize=1024)
     def find_case_number_by_channel_id(self, channel_id: int) -> Optional[str]:
-        for case_id, case in self.cached_cases.items():
+        for case_id, case_data in self.cached_cases.items():
+            case = Data.parse_obj(case_data)
             if channel_id in {case.thread_id, case.trial_thread_id}:
                 logger.debug(
                     "Found case for channel",
@@ -4078,36 +3792,44 @@ class Lawsuit(interactions.Extension):
         lock_acquired = False
 
         try:
-            async with asyncio.timeout(5.0):
-                await lock.acquire()
-                lock_acquired = True
+            for attempt in range(3):
+                try:
+                    async with asyncio.timeout(10.0):
+                        await lock.acquire()
+                        lock_acquired = True
+                        break
+                except asyncio.TimeoutError:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(1 << attempt)
+                    continue
 
-                self._lock_timestamps[case_id] = asyncio.get_running_loop().time()
+            self._lock_timestamps[case_id] = asyncio.get_running_loop().time()
 
-                if case_id in self._lock_contention:
-                    self._lock_contention[case_id] += 1
-                else:
-                    self._lock_contention[case_id] = 1
+            if case_id in self._lock_contention:
+                self._lock_contention[case_id] += 1
+            else:
+                self._lock_contention[case_id] = 1
 
-                logger.debug(
-                    "Lock acquired",
-                    extra={
-                        "case_id": case_id,
-                        "contention_count": self._lock_contention[case_id],
-                    },
-                )
+            logger.debug(
+                "Lock acquired",
+                extra={
+                    "case_id": case_id,
+                    "contention_count": self._lock_contention[case_id],
+                },
+            )
 
-                yield
+            yield
 
-        except* asyncio.TimeoutError as eg:
+        except asyncio.TimeoutError:
             logger.error(
-                "Lock acquisition timeout",
-                extra={"case_id": case_id, "timeout": 5.0, "error": str(eg)},
+                "Lock acquisition timeout after retries",
+                extra={"case_id": case_id, "timeout": 10.0},
             )
             raise
-        except* Exception as eg:
+        except Exception as e:
             logger.exception(
-                "Lock acquisition failed", extra={"case_id": case_id, "error": str(eg)}
+                "Lock acquisition failed", extra={"case_id": case_id, "error": str(e)}
             )
             raise
         finally:
@@ -4123,7 +3845,6 @@ class Lawsuit(interactions.Extension):
                     },
                 )
 
-    @functools.lru_cache(maxsize=1024, typed=True)
     async def get_case_lock(self, case_id: str) -> asyncio.Lock:
         try:
             if existing_lock := self.case_locks.get(case_id):
@@ -4144,42 +3865,47 @@ class Lawsuit(interactions.Extension):
     async def enqueue_case_file_save(self, case_id: str, case: Data) -> None:
         async def save_case_file() -> None:
             try:
-                log_channel, log_forum = await asyncio.gather(
-                    self.bot.fetch_channel(self.config.LOG_CHANNEL_ID),
-                    self.bot.fetch_channel(self.config.LOG_FORUM_ID),
-                    return_exceptions=True,
-                )
 
-                if isinstance(log_channel, Exception) or isinstance(
-                    log_forum, Exception
-                ):
+                log_channel = await self.bot.fetch_channel(self.config.LOG_CHANNEL_ID)
+                log_forum = await self.bot.fetch_channel(self.config.LOG_FORUM_ID)
+
+                if not isinstance(
+                    log_channel, interactions.TextChannel
+                ) or not isinstance(log_forum, interactions.TextChannel):
                     raise RuntimeError("Failed to fetch required channels")
 
                 log_post = await log_forum.fetch_message(self.config.LOG_POST_ID)
-
                 file_name = f"case_{case_id}_{int(time.time())}.txt"
                 content = await self.generate_case_transcript(case_id, case)
 
                 async with contextlib.AsyncExitStack() as stack:
                     temp_file = await stack.enter_async_context(
-                        aiofiles.tempfile.NamedTemporaryFile(mode="w+", delete=False)
+                        aiofiles.tempfile.NamedTemporaryFile(
+                            mode="w+", delete=False, buffering=io.DEFAULT_BUFFER_SIZE
+                        )
                     )
                     async_file = await stack.enter_async_context(
-                        aiofiles.open(temp_file.name, mode="w", encoding="utf-8")
+                        aiofiles.open(
+                            temp_file.name,
+                            mode="w",
+                            encoding="utf-8",
+                            buffering=io.DEFAULT_BUFFER_SIZE,
+                        )
                     )
 
                     await async_file.write(content)
                     await async_file.flush()
+                    os.fsync(async_file.fileno())
 
                     file_obj = interactions.File(temp_file.name, file_name)
                     message = f"Case {case_id} details saved at {datetime.now(timezone.utc).isoformat()}"
 
                     async with asyncio.timeout(10):
-                        await asyncio.gather(
-                            log_channel.send(message, files=[file_obj]),
-                            log_post.send(message, files=[file_obj]),
-                            return_exceptions=True,
-                        )
+                        send_log = log_channel.send(message, files=[file_obj])
+                        send_post = log_post.send(message, files=[file_obj])
+
+                        await send_log
+                        await send_post
 
                 await aiofiles.os.remove(temp_file.name)
 
@@ -4193,6 +3919,7 @@ class Lawsuit(interactions.Extension):
                 raise
 
         try:
+            backoff = 0.5
             for attempt in range(3):
                 try:
                     async with asyncio.timeout(5):
@@ -4201,7 +3928,8 @@ class Lawsuit(interactions.Extension):
                 except asyncio.TimeoutError:
                     if attempt == 2:
                         raise
-                    await asyncio.sleep(0.5 * (attempt + 1))
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
         except Exception:
             logger.exception(f"Failed to enqueue case file save for case {case_id}")
             raise
@@ -4210,20 +3938,18 @@ class Lawsuit(interactions.Extension):
         now = datetime.now(timezone.utc)
         header = await self.generate_report_header(case_id, case, now)
 
-        async def fetch_channel(
-            channel_id: Optional[int],
-        ) -> Optional[interactions.GuildText]:
-            return await self.bot.fetch_channel(channel_id) if channel_id else None
+        async def fetch_channel_transcript(channel_id: Optional[int]) -> Optional[str]:
+            if not channel_id:
+                return None
+            channel = await self.bot.fetch_channel(channel_id)
+            return await self.generate_thread_transcript(channel)
 
-        channels = await asyncio.gather(
-            fetch_channel(case.thread_id), fetch_channel(case.trial_thread_id)
-        )
+        async with asyncio.TaskGroup() as tg:
+            thread_task = tg.create_task(fetch_channel_transcript(case.thread_id))
+            trial_task = tg.create_task(fetch_channel_transcript(case.trial_thread_id))
+            transcripts = [t for t in (await thread_task, await trial_task) if t]
 
-        transcripts = await asyncio.gather(
-            *map(self.generate_thread_transcript, channels)
-        )
-
-        return header + "\n".join(filter(None, transcripts))
+        return header + "\n".join(transcripts)
 
     async def generate_thread_transcript(
         self, thread: Optional[interactions.GuildText]
@@ -4232,52 +3958,60 @@ class Lawsuit(interactions.Extension):
             return None
 
         try:
-            messages = await thread.history(limit=0).flatten()
-            formatted_messages = await asyncio.gather(
-                *map(self.format_message_for_transcript, reversed(messages))
-            )
+            async with asyncio.timeout(30):
+                messages = await thread.history(limit=0).flatten()
+                formatted_messages: list[Optional[str]] = []
 
-            return f"\n## {thread.name}\n\n" + "\n".join(formatted_messages)
-        except Exception as e:
+                async with asyncio.TaskGroup() as tg:
+                    tasks = [
+                        tg.create_task(self.format_message_for_transcript(msg))
+                        for msg in reversed(messages)
+                    ]
+                    formatted_messages.extend([await task for task in tasks])
+
+                return f"\n## {thread.name}\n\n" + "\n".join(
+                    msg for msg in formatted_messages if msg is not None
+                )
+
+        except (asyncio.TimeoutError, Exception) as e:
             logger.exception(
-                f"Failed to generate transcript for thread {thread.id}: {e}"
+                "Thread transcript generation failed",
+                extra={"thread_id": thread.id, "error": str(e)},
             )
             return None
 
     @staticmethod
     async def generate_report_header(case_id: str, case: Data, now: datetime) -> str:
-        fields: List[Tuple[str, str]] = [
+        fields = (
             ("Case ID", case_id),
             ("Plaintiff ID", str(case.plaintiff_id)),
             ("Defendant ID", str(case.defendant_id)),
-            ("Accusation", case.accusation),
-            ("Facts", case.facts),
+            ("Accusation", case.accusation or ""),
+            ("Facts", case.facts or ""),
             ("Filing Time", now.isoformat()),
             (
                 "Case Status",
-                (
-                    case.status.name
-                    if isinstance(case.status, enum.Enum)
-                    else str(case.status)
-                ),
+                case.status.name if hasattr(case.status, "name") else str(case.status),
             ),
-        ]
-        return "\n".join(f"- **{name}:** {value}" for name, value in fields) + "\n\n"
+        )
+        return "".join(
+            itertools.chain((f"- **{n}:** {v}\n" for n, v in fields), ("\n",))
+        )
 
     @staticmethod
     async def format_message_for_transcript(message: interactions.Message) -> str:
-        content_parts: List[str] = [
-            f"{message.author} at {message.created_at.isoformat()}: {message.content}",
-            (
-                f"Attachments: {', '.join(att.url for att in message.attachments)}"
-                if message.attachments
-                else None
-            ),
-            (
-                f"Edited at {message.edited_timestamp.isoformat()}"
-                if message.edited_timestamp
-                else None
-            ),
-        ]
+        content_parts: list[str] = []
+        content_parts.append(
+            f"{message.author} at {message.created_at.isoformat()}: {message.content}"
+        )
 
-        return "\n".join(filter(None, content_parts)) + "\n"
+        if message.attachments:
+            content_parts.append(
+                "Attachments: "
+                + ",".join(map(lambda a: str(a.url), message.attachments))
+            )
+
+        if message.edited_timestamp is not None:
+            content_parts.append(f"Edited at {message.edited_timestamp.isoformat()}")
+
+        return "".join(map(lambda p: p + "\n", content_parts))
