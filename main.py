@@ -22,6 +22,7 @@ import weakref
 from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from enum import IntEnum, StrEnum, auto
 from typing import (
     Annotated,
     Any,
@@ -77,36 +78,44 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 THREAD_POOL_SIZE: Final[int] = min(32, multiprocessing.cpu_count() * 2)
 thread_pool: Final[ThreadPoolExecutor] = ThreadPoolExecutor(
-    max_workers=THREAD_POOL_SIZE, thread_name_prefix="LawsuitWorker"
+    max_workers=THREAD_POOL_SIZE, thread_name_prefix="Lawsuit"
 )
 
 aiofiles.open = functools.partial(
     aiofiles.open, mode="r+b", buffering=io.DEFAULT_BUFFER_SIZE, encoding=None
 )
 
-BASE_DIR: Final[str] = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR: Final[str] = os.path.abspath(os.path.dirname(__file__))
 LOG_FILE: Final[str] = os.path.join(BASE_DIR, "lawsuit.log")
+
 
 logger.remove()
 logger.add(
     sink=LOG_FILE,
     level="DEBUG",
-    format="{time:YYYY-MM-DD HH:mm:ss.SSS ZZ} | {process}:{thread} | {level: <8} | {name}:{function}:{line} | {message}",
-    filter=None,
+    format=(
+        "{time:YYYY-MM-DD HH:mm:ss.SSS ZZ} | "
+        "{process}:{thread} | "
+        "{level: <8} | "
+        "{name}:{function}:{line} - "
+        "{message}"
+    ),
+    filter=lambda record: (
+        record["name"].startswith("extensions.github_d_com__kazuki388_s_Lawsuit.main")
+    ),
     colorize=None,
     serialize=False,
     backtrace=True,
     diagnose=True,
-    enqueue=True,
+    context=None,
+    enqueue=False,
     catch=True,
     rotation="1 MB",
-    compression="zip",
+    retention=1,
+    compression="gz",
     encoding="utf-8",
     mode="a",
-    delay=False,
-    errors="replace",
 )
-
 
 # Schema
 
@@ -151,10 +160,10 @@ class Config:
     )
 
 
-class CaseStatus(enum.StrEnum):
-    FILED = enum.auto()
-    IN_PROGRESS = enum.auto()
-    CLOSED = enum.auto()
+class CaseStatus(StrEnum):
+    FILED = auto()
+    IN_PROGRESS = auto()
+    CLOSED = auto()
 
     @classmethod
     def validate(cls, value: str) -> CaseStatus:
@@ -164,7 +173,7 @@ class CaseStatus(enum.StrEnum):
             raise ValueError(f"Invalid status: {value}. Must be one of {list(cls)}")
 
 
-class EmbedColor(enum.IntEnum):
+class EmbedColor(IntEnum):
     OFF = 0x5D5A58
     FATAL = 0xFF4343
     ERROR = 0xE81123
@@ -179,14 +188,14 @@ class EmbedColor(enum.IntEnum):
         return getattr(cls, level.upper(), cls.INFO)
 
 
-class CaseRole(enum.StrEnum):
-    PROSECUTOR = enum.auto()
-    PRIVATE_PROSECUTOR = enum.auto()
-    PLAINTIFF = enum.auto()
-    AGENT = enum.auto()
-    DEFENDANT = enum.auto()
-    DEFENDER = enum.auto()
-    WITNESS = enum.auto()
+class CaseRole(StrEnum):
+    PROSECUTOR = auto()
+    PRIVATE_PROSECUTOR = auto()
+    PLAINTIFF = auto()
+    AGENT = auto()
+    DEFENDANT = auto()
+    DEFENDER = auto()
+    WITNESS = auto()
 
     @classmethod
     def validate(cls, value: str) -> CaseRole:
@@ -196,34 +205,34 @@ class CaseRole(enum.StrEnum):
             raise ValueError(f"Invalid role: {value}. Must be one of {list(cls)}")
 
 
-class EvidenceAction(enum.StrEnum):
-    PENDING = enum.auto()
-    APPROVED = enum.auto()
-    REJECTED = enum.auto()
+class EvidenceAction(StrEnum):
+    PENDING = auto()
+    APPROVED = auto()
+    REJECTED = auto()
 
 
-class RoleAction(enum.StrEnum):
-    ASSIGN = enum.auto()
-    REVOKE = enum.auto()
+class RoleAction(StrEnum):
+    ASSIGN = auto()
+    REVOKE = auto()
 
 
-class UserAction(enum.StrEnum):
-    MUTE = enum.auto()
-    UNMUTE = enum.auto()
+class UserAction(StrEnum):
+    MUTE = auto()
+    UNMUTE = auto()
 
 
-class MessageAction(enum.StrEnum):
-    PIN = enum.auto()
-    DELETE = enum.auto()
+class MessageAction(StrEnum):
+    PIN = auto()
+    DELETE = auto()
 
 
-class CaseAction(enum.StrEnum):
-    FILE = enum.auto()
-    CLOSE = enum.auto()
-    WITHDRAW = enum.auto()
-    REGISTER = enum.auto()
-    DISMISS = enum.auto()
-    OPEN = enum.auto()
+class CaseAction(StrEnum):
+    FILE = auto()
+    CLOSE = auto()
+    WITHDRAW = auto()
+    REGISTER = auto()
+    DISMISS = auto()
+    OPEN = auto()
 
 
 class Attachment(pydantic.BaseModel):
@@ -1437,7 +1446,6 @@ class Lawsuit(interactions.Extension):
                 logger.debug("Cleanup task cancelled successfully")
             except asyncio.TimeoutError:
                 logger.error("Cleanup task cancellation timed out")
-                # Force cleanup if timeout occurs
 
             except Exception as e:
                 logger.exception(
@@ -1477,53 +1485,67 @@ class Lawsuit(interactions.Extension):
     @interactions.modal_callback("lawsuit_form_modal")
     async def submit_lawsuit_form(self, ctx: interactions.ModalContext) -> None:
         try:
+            await ctx.defer(ephemeral=True)
+
             logger.debug(f"Processing lawsuit form: {ctx.responses}")
 
-            is_valid, sanitized_data = self.validate_and_sanitize(ctx.responses)
-            if not is_valid:
+            if not all(ctx.responses.values()):
                 await self.view.send_error(
                     ctx, "Please ensure all fields are properly filled"
                 )
                 return
 
-            defendant_id_str = sanitized_data.get("defendant_id")
+            defendant_id_str = ctx.responses.get("defendant_id_0", "").strip()
             if not defendant_id_str:
                 await self.view.send_error(ctx, "Valid defendant ID required")
                 return
 
-            is_valid_defendant, validated_defendant_id = await self.validate_defendant(
-                defendant_id_str
-            )
-            if not is_valid_defendant:
-                await self.view.send_error(ctx, "Invalid defendant ID provided")
+            try:
+                defendant_id = int("".join(filter(str.isdigit, defendant_id_str)))
+                try:
+                    user = await self.bot.fetch_user(defendant_id)
+                    if not user:
+                        await self.view.send_error(ctx, "Invalid defendant ID provided")
+                        return
+                except NotFound:
+                    await self.view.send_error(ctx, "User not found")
+                    return
+            except ValueError:
+                await self.view.send_error(ctx, "Invalid defendant ID format")
                 return
 
-            if validated_defendant_id == ctx.author.id:
+            if defendant_id == ctx.author.id:
                 await self.view.send_error(ctx, "Self-litigation is not permitted")
                 return
 
-            async with self.repository.transaction() as transaction:
-                case_id, case = await self.create_new_case(
-                    ctx, sanitized_data, validated_defendant_id
+            sanitized_data = {
+                "defendant_id": str(defendant_id),
+                "accusation": ctx.responses.get("accusation_1", ""),
+                "facts": ctx.responses.get("facts_2", ""),
+            }
+
+            async with asyncio.TaskGroup() as tg:
+                case_task = tg.create_task(
+                    self.create_new_case(ctx, sanitized_data, defendant_id)
                 )
+                case_id, case = await case_task
+
                 if not case_id or not case:
-                    raise ValueError("Case creation failed")
+                    await self.view.send_error(ctx, "Failed to create case")
+                    return
 
-                if not await self.setup_mediation_thread(case_id, case):
-                    raise ValueError("Mediation thread setup failed")
+                setup_task = tg.create_task(self.setup_mediation_thread(case_id, case))
+                notify_task = tg.create_task(self.notify_judges(case_id, ctx.guild_id))
 
-                await transaction.commit()
+                await asyncio.gather(setup_task, notify_task)
 
             await self.view.send_success(
                 ctx, f"Mediation room #{case_id} created successfully"
             )
 
-            await self.notify_judges(case_id, ctx.guild_id)
-            logger.info(f"Case {case_id} created and judges notified")
-
-        except ValueError as ve:
-            logger.error("Validation error", exc_info=True, extra={"error": str(ve)})
-            await self.view.send_error(ctx, str(ve))
+        except asyncio.TimeoutError:
+            logger.error("Operation timed out during lawsuit submission")
+            await self.view.send_error(ctx, "Operation timed out. Please try again.")
         except Exception as e:
             logger.exception(
                 "Lawsuit submission failed", exc_info=True, extra={"error": str(e)}
@@ -1531,7 +1553,6 @@ class Lawsuit(interactions.Extension):
             await self.view.send_error(
                 ctx, "An unexpected error occurred. Please try again later."
             )
-            raise
 
     @interactions.component_callback("dismiss_*")
     async def handle_dismiss(self, ctx: interactions.ComponentContext) -> None:
@@ -3403,68 +3424,6 @@ class Lawsuit(interactions.Extension):
         results = await asyncio.gather(*tasks)
         return any(results)
 
-    def validate_and_sanitize(
-        self,
-        responses: Dict[str, str],
-    ) -> Tuple[bool, Dict[str, str]]:
-        field_mapping: Final[Dict[str, str]] = {
-            "defendant_id_0": "defendant_id",
-            "accusation_1": "accusation",
-            "facts_2": "facts",
-        }
-
-        sanitized_data: Dict[str, str] = {
-            field_mapping[field_id]: self.sanitize_user_input(value)
-            for field_id, value in responses.items()
-            if field_id in field_mapping
-        }
-
-        expected_fields: Final[frozenset] = frozenset(
-            {"defendant_id", "accusation", "facts"}
-        )
-
-        is_valid = (
-            len(sanitized_data) == len(expected_fields)
-            and all(sanitized_data.values())
-            and expected_fields <= sanitized_data.keys()
-        )
-
-        logger.debug(
-            "Form validation result: valid=%s, data=%s", is_valid, sanitized_data
-        )
-        return is_valid, sanitized_data
-
-    async def validate_defendant(
-        self,
-        defendant_id_str: str,
-    ) -> Tuple[bool, Optional[int]]:
-        if not defendant_id_str:
-            logger.error("Defendant ID is missing")
-            return False, None
-
-        def is_digit(c: str) -> TypeGuard[str]:
-            return c.isdigit()
-
-        cleaned_id = "".join(filter(is_digit, defendant_id_str))
-        if not cleaned_id:
-            logger.error("No valid digits in defendant ID: '%s'", defendant_id_str)
-            return False, None
-
-        try:
-            defendant_id = int(cleaned_id)
-            user = await self.bot.fetch_user(defendant_id)
-            return bool(user), defendant_id
-        except ValueError:
-            logger.error("Invalid defendant ID format: '%s'", defendant_id_str)
-        except NotFound:
-            logger.error("Defendant user not found: '%s'", defendant_id_str)
-        except Exception:
-            logger.exception(
-                "Unexpected error validating defendant ID: '%s'",
-                defendant_id_str,
-            )
-        return False, None
-
     # Helper methods
 
     async def archive_thread(self, thread_id: int) -> bool:
@@ -3612,7 +3571,7 @@ class Lawsuit(interactions.Extension):
         try:
             async with asyncio.timeout(15.0):
                 async with asyncio.TaskGroup() as tg:
-                    channel_task = tg.create_task(self.get_courtroom_channel())
+                    channel_task = tg.create_task(self.courtroom_channel)
                     guild_task = tg.create_task(
                         self.bot.fetch_guild(self.config.GUILD_ID)
                     )
@@ -3647,7 +3606,7 @@ class Lawsuit(interactions.Extension):
                     )
                     return True
 
-        except* Exception:
+        except Exception:
             logger.exception(
                 "Mediation thread setup failed",
                 extra={"case_id": case_id},
@@ -4246,10 +4205,6 @@ class Lawsuit(interactions.Extension):
         except Exception:
             logger.exception(f"Failed to enqueue case file save for case {case_id}")
             raise
-
-    @case_data_cache.setter
-    def case_data_cache(self, value):
-        self._case_data_cache = value
 
     async def generate_case_transcript(self, case_id: str, case: Data) -> str:
         now = datetime.now(timezone.utc)
