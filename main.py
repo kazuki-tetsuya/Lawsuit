@@ -50,7 +50,12 @@ import orjson
 import pydantic
 import sortedcontainers
 import uvloop
-from interactions.api.events import ExtensionUnload, MessageCreate, NewThreadCreate
+from interactions.api.events import (
+    ExtensionLoad,
+    ExtensionUnload,
+    MessageCreate,
+    NewThreadCreate,
+)
 from interactions.client.errors import Forbidden, HTTPException, NotFound
 
 T = TypeVar("T", bound=object)
@@ -61,7 +66,7 @@ R = TypeVar("R", bound=object)
 ContextVarLock: TypeAlias = Dict[str, asyncio.Lock | None]
 
 
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+# asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 
 THREAD_POOL_SIZE: int = min(32, (os.cpu_count() or multiprocessing.cpu_count()) << 1)
@@ -347,19 +352,29 @@ class Data(pydantic.BaseModel):
 
 class Store:
     def __init__(self) -> None:
-        self.db_path = os.path.join(BASE_DIR, "cases.json")
+        self.db_path: str = os.path.join(BASE_DIR, "cases.json")
+        self.store_initialized: bool = False
+        self.store_initialization_lock: asyncio.Lock = asyncio.Lock()
 
     async def initialize_store(self) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-            db_dir = os.path.dirname(self.db_path)
-            await loop.run_in_executor(None, os.makedirs, db_dir, 0o755, True)
-            await self.ensure_db_file()
-        except OSError as e:
-            logger.critical("Failed to initialize store: %s", repr(e))
-            raise RuntimeError(
-                f"Store initialization failed: {e.__class__.__name__}"
-            ) from e
+        if self.store_initialized or self.store_initialization_lock.locked():
+            return
+
+        async with self.store_initialization_lock:
+            if self.store_initialized:
+                return
+
+            try:
+                loop = asyncio.get_running_loop()
+                db_dir = os.path.dirname(self.db_path)
+                await loop.run_in_executor(None, os.makedirs, db_dir, 0o755, True)
+                await self.ensure_db_file()
+                self.store_initialized = True
+            except OSError as e:
+                logger.critical("Failed to initialize store: %s", repr(e))
+                raise RuntimeError(
+                    f"Store initialization failed: {e.__class__.__name__}"
+                ) from e
 
     async def ensure_db_file(self) -> None:
         try:
@@ -376,6 +391,9 @@ class Store:
 
     @contextlib.asynccontextmanager
     async def file_lock(self, mode: str, shared: bool = False) -> AsyncIterator[Any]:
+        if not self.store_initialized:
+            await self.initialize_store()
+
         loop = asyncio.get_running_loop()
         f = await aiofiles.open(self.db_path, mode=mode)
         try:
@@ -440,28 +458,34 @@ class Store:
 
 class Repository(Generic[T]):
     def __init__(self) -> None:
-        self.store = Store()
+        self.store: Store = Store()
         self.cached_cases: cachetools.TTLCache = cachetools.TTLCache(
             maxsize=1024, ttl=3600
         )
         self.repo_case_locks: collections.defaultdict[str, asyncio.Lock] = (
             collections.defaultdict(asyncio.Lock)
         )
-        self.initialization_lock: asyncio.Lock = asyncio.Lock()
-        self.initialized: bool = False
+        self.repo_initialization_lock: asyncio.Lock = asyncio.Lock()
+        self.repo_initialized: bool = False
 
     async def initialize_repository(self) -> None:
-        if self.initialized or self.initialization_lock.locked():
+        if self.repo_initialized or self.repo_initialization_lock.locked():
             return
-        async with self.initialization_lock:
-            if self.initialized:
-                return
-            await self.store.initialize_store()
-            self.initialized = True
-            logger.debug(
-                "Repository initialized with optimized configuration",
-                extra={"initialized": True},
-            )
+
+        try:
+            async with asyncio.timeout(10):
+                async with self.repo_initialization_lock:
+                    if self.repo_initialized:
+                        return
+                    await self.store.initialize_store()
+                    self.repo_initialized = True
+                    logger.debug(
+                        "Repository initialized with optimized configuration",
+                        extra={"initialized": True},
+                    )
+        except asyncio.TimeoutError:
+            logger.error("Repository initialization timed out")
+            raise
 
     @contextlib.asynccontextmanager
     async def case_lock_manager(self, case_id: str) -> AsyncIterator[None]:
@@ -477,7 +501,7 @@ class Repository(Generic[T]):
             raise
 
     async def get_case_data(self, case_id: str) -> Optional[T]:
-        if not self.initialized:
+        if not self.repo_initialized:
             await self.initialize_repository()
         try:
             cached = self.cached_cases.get(case_id)
@@ -550,7 +574,7 @@ class Repository(Generic[T]):
                 raise RuntimeError(f"Failed to delete case {case_id}") from e
 
     async def get_all_cases(self) -> Dict[str, T]:
-        if not self.initialized:
+        if not self.repo_initialized:
             await self.initialize_repository()
         case_data = await self.store.read_all()
         return dict(
@@ -1026,6 +1050,10 @@ class View:
             raise RuntimeError("Cache clearing failed", e.__class__.__name__) from e
 
 
+# Controller
+
+
+
 async def user_is_judge(ctx: interactions.BaseContext) -> bool:
     judge_id: int = Config().JUDGE_ROLE_ID
     result: bool = any(r.id == judge_id for r in ctx.author.roles)
@@ -1037,27 +1065,45 @@ async def user_is_judge(ctx: interactions.BaseContext) -> bool:
     return result
 
 
-# Controller
+async def safe_anext(
+    aiterator: AsyncIterator[T], default: Optional[T] = None
+) -> Optional[T]:
+    return await aiterator.__anext__() if hasattr(aiterator, "__anext__") else default
+
+
+def safe_aiter(iterable: Any) -> AsyncIterator[Any]:
+    if hasattr(iterable, "__aiter__"):
+        return iterable.__aiter__()
+    if hasattr(iterable, "__iter__"):
+
+        async def async_iter():
+            for item in iterable:
+                yield item
+
+        return async_iter()
+    raise TypeError(f"Object {type(iterable).__name__} is not iterable")
 
 
 class Lawsuit(interactions.Extension):
     def __init__(self, bot: interactions.Client) -> None:
-        self.bot = bot
-        self.config = Config()
-        self.store = Store()
+        self.bot: interactions.Client = bot
+        self.config: Config = Config()
+        self.store: Store = Store()
         self.repo: Repository = Repository()
-        self.view = View(bot)
+        self.view: View = View(bot)
         self.cached_cases: dict[str, Repository] = {}
         self.case_data_cache: cachetools.TTLCache = cachetools.TTLCache(
             maxsize=1000, ttl=300
         )
-        self.lock_timestamps = sortedcontainers.SortedDict()
-        self.case_lock = asyncio.Lock()
+        self.lock_timestamps: sortedcontainers.SortedDict = (
+            sortedcontainers.SortedDict()
+        )
+        self.case_lock: asyncio.Lock = asyncio.Lock()
         self.case_task_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=10000)
-        self.shutdown_event = asyncio.Event()
-        self.lawsuit_button_message_id = None
+        self.shutdown_event: asyncio.Event = asyncio.Event()
+        self.lawsuit_button_message_id: Optional[int] = None
         self.lock_contention: dict[str, int] = {}
-        self.case_handlers = {
+        self.case_handlers: dict[CaseAction, Callable] = {
             CaseAction.FILE: self.handle_file_case_request,
             CaseAction.WITHDRAW: lambda ctx, case_id, case, member: self.handle_case_closure(
                 ctx, case_id, case, member, action=CaseAction.WITHDRAW
@@ -1070,36 +1116,16 @@ class Lawsuit(interactions.Extension):
             ),
             CaseAction.REGISTER: self.handle_accept_case_request,
         }
-        self.case_locks = cachetools.TTLCache(maxsize=1000, ttl=300)
-        self.init_task = asyncio.create_task(
-            self.initialize_background_tasks(), name="LawsuitInitialization"
+        self.cache_case_locks: cachetools.TTLCache = cachetools.TTLCache(
+            maxsize=1000, ttl=300
         )
-        self.init_task.add_done_callback(lambda t: self.handle_init_exception(t))
-        self.cleanup_task = None
-        self._case_locks = sortedcontainers.SortedDict()
+        self.sorted_case_locks: sortedcontainers.SortedDict = (
+            sortedcontainers.SortedDict()
+        )
+        self.ext_initialized: bool = False
+        self.ext_tasks: list[asyncio.Task] = []
 
     # Tasks
-
-    async def initialize_background_tasks(self) -> None:
-        tasks = {
-            "_fetch_cases": self.fetch_cases,
-            "_daily_embed_update": self.daily_embed_update,
-            "_process_task_queue": self.process_task_queue,
-        }
-        for name, coro in tasks.items():
-            task = asyncio.create_task(coro(), name=name)
-            task.add_done_callback(self.handle_task_exception)
-
-    @staticmethod
-    def handle_init_exception(future: asyncio.Future[None]) -> None:
-        try:
-            future.result()
-        except Exception as e:
-            logger.critical(
-                "Critical initialization failure",
-                exc_info=True,
-                extra={"error": str(e)},
-            )
 
     def handle_task_exception(self, task: asyncio.Task[Any]) -> None:
         task_name = task.get_name()
@@ -1140,13 +1166,13 @@ class Lawsuit(interactions.Extension):
         try:
             async with contextlib.AsyncExitStack() as stack:
                 await stack.enter_async_context(self.case_lock)
-                self._case_locks.clear()
+                self.sorted_case_locks.clear()
                 self.lock_timestamps.clear()
                 self.lock_contention.clear()
                 logger.info(
                     "Lock cleanup completed",
                     extra={
-                        "locks_cleared": len(self._case_locks),
+                        "locks_cleared": len(self.sorted_case_locks),
                         "timestamps_cleared": len(self.lock_timestamps),
                         "contention_cleared": len(self.lock_contention),
                     },
@@ -1355,42 +1381,78 @@ class Lawsuit(interactions.Extension):
             )
             raise
 
+    @interactions.listen(ExtensionLoad)
+    async def on_extension_load(self, event: ExtensionLoad) -> None:
+        if self.ext_initialized:
+            return
+
+        try:
+            logger.info("Starting Lawsuit extension initialization.")
+            await self.repo.initialize_repository()
+            logger.info("Repository initialized.")
+
+            async with asyncio.timeout(30):
+                self.ext_tasks = [
+                    asyncio.create_task(coro(), name=name)
+                    for name, coro in (
+                        ("_fetch_cases", self.fetch_cases),
+                        ("_daily_embed_update", self.daily_embed_update),
+                        ("_process_task_queue", self.process_task_queue),
+                    )
+                ]
+                logger.info("Created extension tasks.")
+
+                for task in self.ext_tasks:
+                    task.add_done_callback(self.handle_task_exception)
+                logger.info("Added task callbacks.")
+
+                self.ext_initialized = True
+                logger.info("Lawsuit extension initialized successfully")
+
+        except Exception as e:
+            logger.critical(
+                "Critical initialization failure",
+                exc_info=True,
+                extra={"error": str(e)},
+            )
+            raise
+
     @interactions.listen(ExtensionUnload)
-    async def on_extension_unload(self) -> None:
+    async def on_extension_unload(self, event: ExtensionUnload) -> None:
         logger.info("Initiating Lawsuit extension unload sequence")
         self.shutdown_event.set()
 
-        if _cleanup_task := self.cleanup_task:
-            if not _cleanup_task.done():
-                try:
-                    _cleanup_task.cancel()
-                    async with asyncio.timeout(5.0):
-                        try:
-                            await _cleanup_task
-                        except asyncio.CancelledError:
-                            pass
-                    logger.debug("Cleanup task cancelled successfully")
-                except asyncio.TimeoutError:
-                    logger.error("Cleanup task cancellation timed out")
-                except Exception as eg:
-                    logger.exception(
-                        "Cleanup task cancellation failed",
-                        extra={"error": str(eg), "error_type": type(eg).__name__},
-                    )
-                    raise eg from None
-
         try:
-            async with asyncio.timeout(10.0):
-                await self.cleanup_locks()
-        except* Exception as eg:
-            exc = eg.exceptions[0]
-            logger.exception(
-                "Lock cleanup failed during unload",
-                extra={"error": str(exc), "error_type": type(exc).__name__},
-            )
-            raise exc from None
+            for task in self.ext_tasks:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        async with asyncio.timeout(5.0):
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
+                    except asyncio.TimeoutError:
+                        logger.error(f"Task {task.get_name()} cancellation timed out")
+                    except Exception as e:
+                        logger.exception(
+                            f"Task {task.get_name()} cancellation failed",
+                            extra={"error": str(e), "error_type": type(e).__name__},
+                        )
 
-        logger.info("Lawsuit extension unloaded successfully")
+            try:
+                async with asyncio.timeout(5.0):
+                    await self.cleanup_locks()
+            except Exception as e:
+                logger.error(f"Lock cleanup failed: {e}")
+
+            self.ext_initialized = False
+            self.ext_tasks.clear()
+            logger.info("Lawsuit extension unloaded successfully")
+
+        except Exception as e:
+            logger.critical(f"Critical unload failure: {e}", exc_info=True)
+            raise
 
     # Component
 
@@ -2399,18 +2461,14 @@ class Lawsuit(interactions.Extension):
     ) -> None:
         try:
             async with asyncio.TaskGroup() as tg:
-                channel = await anext(
-                    aiter(
-                        [await tg.create_task(self.bot.fetch_channel(ctx.channel_id))][
-                            0
-                        ]
-                    )
-                )
+                channel = await self.bot.fetch_channel(ctx.channel_id)
                 if not channel:
                     raise ValueError(f"Channel {ctx.channel_id} not found")
-                message = await anext(
-                    aiter([await tg.create_task(channel.fetch_message(target_id))][0])
+
+                message_iterator = safe_aiter(
+                    [await tg.create_task(channel.fetch_message(target_id))]
                 )
+                message = await safe_anext(message_iterator)
                 if not message:
                     raise ValueError(f"Message {target_id} not found")
 
@@ -3461,12 +3519,13 @@ class Lawsuit(interactions.Extension):
                     )
                     return False
 
-                messages = parent_channel.history(limit=50).__aiter__()
+                messages = safe_aiter(parent_channel.history(limit=5))
                 while True:
                     try:
-                        message = await anext(messages)
+                        message = await safe_anext(messages)
                         if (
-                            message.type == interactions.MessageType.THREAD_CREATED
+                            message is not None
+                            and message.type == interactions.MessageType.THREAD_CREATED
                             and message.thread_id == thread.id
                         ):
                             await asyncio.shield(message.delete())
@@ -4222,7 +4281,7 @@ class Lawsuit(interactions.Extension):
 
     async def get_case_lock(self, case_id: str) -> asyncio.Lock:
         try:
-            return self.case_locks.setdefault(case_id, asyncio.Lock())
+            return self.cache_case_locks.setdefault(case_id, asyncio.Lock())
         except Exception as e:
             logger.exception(
                 "Lock creation failed",
