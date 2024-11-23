@@ -7,5 +7,4 @@ uvloop
 cachetools
 pydantic
 sortedcontainers
-loguru
 yarl
