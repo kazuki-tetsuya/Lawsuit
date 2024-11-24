@@ -52,23 +52,6 @@ T = TypeVar("T", bound=object)
 P = TypeVar("P", bound=object, contravariant=True)
 R = TypeVar("R", bound=object)
 
-
-ContextVarLock: TypeAlias = Dict[str, asyncio.Lock | None]
-
-
-THREAD_POOL_SIZE: int = min(32, (os.cpu_count() or multiprocessing.cpu_count()) << 1)
-thread_pool: ThreadPoolExecutor = ThreadPoolExecutor(
-    max_workers=THREAD_POOL_SIZE,
-    thread_name_prefix="Lawsuit",
-    initializer=lambda: os.nice(19),
-)
-
-
-aiofiles.open = functools.partial(
-    aiofiles.open, mode="r+b", encoding=None, errors=None, closefd=True, opener=None
-)
-
-
 BASE_DIR: str = os.path.dirname(os.path.realpath(__file__))
 LOG_FILE: str = os.path.join(BASE_DIR, "lawsuit.log")
 
@@ -740,10 +723,32 @@ class Lawsuit(interactions.Extension):
                 async with asyncio.timeout(30):
                     cases = await self.repo.get_all_cases()
                     logger.info("Cases fetched successfully")
-                    await asyncio.sleep(min(300, max(60, len(cases) // 2)))
-            except Exception:
-                logger.exception("Case fetch failed")
-                await asyncio.sleep(60)
+
+                    sleep_duration = min(300, max(60, len(cases) // 2))
+
+                    try:
+                        await asyncio.sleep(sleep_duration)
+                    except asyncio.CancelledError:
+                        logger.info("Fetch cases task cancelled during sleep")
+                        return
+
+            except asyncio.TimeoutError:
+                logger.warning("Case fetch operation timed out, retrying in 60s")
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    logger.info("Fetch cases task cancelled during timeout recovery")
+                    return
+            except asyncio.CancelledError:
+                logger.info("Fetch cases task cancelled")
+                return
+            except Exception as e:
+                logger.exception("Case fetch failed with error: %s", str(e))
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    logger.info("Fetch cases task cancelled during error recovery")
+                    return
 
     async def process_task_queue(self) -> None:
         while not self.shutdown_event.is_set():
@@ -809,14 +814,19 @@ class Lawsuit(interactions.Extension):
 
         try:
             async with asyncio.timeout(3.0):
-                await self.delete_thread_created_message(
-                    event.thread.parent_id, event.thread
+                await asyncio.shield(
+                    self.delete_thread_created_message(
+                        event.thread.parent_id, event.thread
+                    )
                 )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Thread deletion timed out", extra={"thread_id": event.thread.id}
+            )
         except Exception:
             logger.exception(
                 "Thread deletion failed", extra={"thread_id": event.thread.id}
             )
-            raise
 
     @interactions.listen(MessageCreate)
     async def on_message_create(self, event: MessageCreate) -> None:
@@ -837,23 +847,25 @@ class Lawsuit(interactions.Extension):
 
     @interactions.listen(ExtensionUnload)
     async def on_extension_unload(self) -> None:
-        self.shutdown_event.set()
+        try:
+            self.shutdown_event.set()
 
-        for task in self.ext_tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    async with asyncio.timeout(5.0):
-                        await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    logger.exception(
-                        f"Task {task.get_name()} failed", extra={"error": str(e)}
-                    )
+            for task in self.ext_tasks:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=5.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
 
-        self.ext_initialized = False
-        self.ext_tasks.clear()
+            if hasattr(self.bot, "_http"):
+                await self.bot._http.close()
+
+            self.ext_initialized = False
+            self.ext_tasks.clear()
+
+        except Exception as e:
+            logger.exception(f"Error during extension cleanup: {e}")
 
     # Components
 
@@ -893,9 +905,15 @@ class Lawsuit(interactions.Extension):
 
             case_id, case = await self.create_new_case(ctx, case_data, defendant_id)
             if case_id and case:
-                await self.setup_mediation_thread(case_id, case)
-                await self.notify_judges(case_id, ctx.guild_id)
-                await self.view.send_success(ctx, f"Mediation room #{case_id} created.")
+                if await self.setup_mediation_thread(case_id, case):
+                    updated_case = await self.repo.get_case_data(case_id)
+                    if updated_case and updated_case.thread_id:
+                        await self.notify_judges(case_id, ctx.guild_id)
+                        await self.view.send_success(ctx, f"Mediation room #{case_id} created.")
+                    else:
+                        await self.view.send_error(ctx, "Failed to setup mediation room.")
+                else:
+                    await self.view.send_error(ctx, "Failed to setup mediation room.")
             else:
                 await self.view.send_error(ctx, "Failed to create case.")
 
@@ -1611,7 +1629,7 @@ class Lawsuit(interactions.Extension):
         ]
 
         await self.notify_users(
-            user_ids=case.judges,
+            user_ids=judge_members,
             notification_func=functools.partial(
                 self.send_dm, embed=embed, components=components
             ),
@@ -1729,26 +1747,6 @@ class Lawsuit(interactions.Extension):
 
     # Evidence
 
-    @staticmethod
-    async def fetch_attachment_as_file(
-        attachment: Dict[str, str]
-    ) -> Optional[interactions.File]:
-        url, filename = attachment["url"], attachment["filename"]
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    content = await response.content.read()
-                    if not content:
-                        return None
-                    return interactions.File(
-                        file=io.BytesIO(content),
-                        file_name=filename,
-                        description=f"Evidence attachment for {filename}",
-                    )
-        except Exception as e:
-            logger.error(f"Error fetching attachment: {e}", extra={"url": url})
-            return None
-
     async def process_evidence_decision(
         self,
         ctx: interactions.ComponentContext,
@@ -1828,6 +1826,34 @@ class Lawsuit(interactions.Extension):
         except Exception as e:
             logger.error(f"Failed to publish evidence: {e}")
             await self.view.send_error(ctx, "Failed to publish evidence.")
+
+    @staticmethod
+    async def fetch_attachment_as_file(
+        attachment: Dict[str, str]
+    ) -> Optional[interactions.File]:
+        url, filename = attachment["url"], attachment["filename"]
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if not response.ok:
+                        logger.warning(
+                            f"Failed to fetch attachment: HTTP {response.status}",
+                            extra={"url": url},
+                        )
+                        return None
+                    content = await response.read()
+                    if not content:
+                        return None
+                    file = io.BytesIO(content)
+                    file.seek(0)
+                    return interactions.File(
+                        file=file,
+                        file_name=filename,
+                        description=f"Evidence attachment for {filename}",
+                    )
+        except Exception as e:
+            logger.error(f"Error fetching attachment: {e}", extra={"url": url})
+            return None
 
     async def handle_rejected_evidence(
         self,
@@ -2027,13 +2053,28 @@ class Lawsuit(interactions.Extension):
             if not isinstance(channel, interactions.GuildText):
                 return False
 
-            async for message in channel.history(limit=10):
-                if (
-                    message.type == interactions.MessageType.THREAD_CREATED
-                    and message.thread.id == thread.id
-                ):
-                    await message.delete()
-                    return True
+            async with asyncio.timeout(2.0):
+                async for message in channel.history(limit=5):
+                    if (
+                        message.type == interactions.MessageType.THREAD_CREATED
+                        and message.thread.id == thread.id
+                    ):
+                        try:
+                            await message.delete()
+                            return True
+                        except Exception:
+                            logger.warning(
+                                "Failed to delete message",
+                                extra={"message_id": message.id},
+                                exc_info=True,
+                            )
+                            return False
+            return False
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timeout while fetching channel history",
+                extra={"channel_id": channel_id, "thread_id": thread.id},
+            )
             return False
         except Exception:
             logger.exception(
@@ -2096,12 +2137,25 @@ class Lawsuit(interactions.Extension):
             return False
 
     async def update_case_with_thread(self, case_id: str, thread_id: int) -> bool:
-        try:
-            await self.repo.update_case(case_id, thread_id=thread_id)
-            return True
-        except Exception:
-            logger.exception("Failed to update case thread", extra={"case_id": case_id})
-            return False
+        for attempt in range(3):
+            try:
+                async with asyncio.timeout(3.0):
+                    await self.repo.update_case(
+                        case_id,
+                        thread_id=thread_id,
+                        updated_at=datetime.now(timezone.utc).replace(microsecond=0),
+                    )
+                    return True
+            except asyncio.TimeoutError:
+                if attempt < 2:
+                    await asyncio.sleep(2**attempt)
+                    continue
+            except Exception as e:
+                logger.exception(
+                    str(e), extra={"case_id": case_id, "thread_id": thread_id}
+                )
+                break
+        return False
 
     @staticmethod
     def sanitize_input(text: str, max_length: int = 2000) -> str:
@@ -2166,6 +2220,13 @@ class Lawsuit(interactions.Extension):
             facts=sanitized.get("facts", ""),
             status=CaseStatus.FILED,
             judges=frozenset(),
+            allowed_roles=frozenset(),
+            mute_list=frozenset(),
+            roles={},
+            evidence_queue=tuple(),
+            thread_id=None,
+            trial_thread_id=None,
+            log_message_id=None,
             created_at=now,
             updated_at=now,
         )
@@ -2328,10 +2389,23 @@ class Lawsuit(interactions.Extension):
         lock = self.repo.repo_case_locks[case_id]
 
         try:
-            async with asyncio.timeout(30), lock:
-                yield
+            async with asyncio.timeout(3.0):
+                async with lock:
+                    try:
+                        yield
+                    except asyncio.CancelledError:
+                        logger.info(
+                            "Operation cancelled while holding lock",
+                            extra={"case_id": case_id},
+                        )
+                        raise
         except asyncio.TimeoutError:
-            logger.error("Lock timeout", extra={"case_id": case_id})
+            logger.error("Lock acquisition timeout", extra={"case_id": case_id})
+            raise
+        except Exception as e:
+            logger.exception(
+                f"Lock error: {type(e).__name__}", extra={"case_id": case_id}
+            )
             raise
 
     # Transcript
