@@ -1,10 +1,5 @@
 aiofiles
 aiohttp
-bleach
 discord-py-interactions
 orjson
-uvloop
 cachetools
-pydantic
-sortedcontainers
-yarl
