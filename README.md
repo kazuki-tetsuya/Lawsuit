@@ -1,44 +1,90 @@
-- [中文](#discord机器人框架模块模板)
-- [English](#discord-bot-framework-module-template)
+# Lawsuit
 
-# Discord机器人框架模块模板
-这是针对[Discord机器人内核](https://github.com/retr0-init/Discord-Bot-Framework-Kernel.git)配套的模块模板。其开发可以参考[interactions.py](https://interactions-py.github.io/interactions.py/)。
+The **Lawsuit** module is designed to manage legal proceedings within a server. It provides structured case management, evidence handling, and role-based access control.
 
-## 开发中需要考虑的事
-- 模块主要点在[`main.py`](main.py)中。
-- 所有主要的工作都应该在继承自`interactions.Extension`的类中进行。
-- 最好在指令基或指令组中定义你的命令。
-- 命令名不能：
-    - 是大写。
-    - 包含除下划线`_`之外的特殊符号。
-    - 包括空格。
-- 你可以用另一个`.py`文件来定义内部模块函数。这个文件需要与`main.py`同级。注意你要像以下来引入内部模块：
+## Features
+
+- Automated case filing system
+- Trial thread creation and management
+- Case status tracking
+- Judge and participant role control
+- Permission-based access
+- User moderation tools
+- Secure evidence submission
+- Multi-format file support
+- Evidence review process
+- Case transcripts and history
+- Automated action logging
+
+## Usage
+
+### Slash Commands
+
+- `/lawsuit init`: Initialize the lawsuit management system
+  - Requires Judge role
+  - Sets up necessary channels and permissions
+  - Initializes database and background tasks
+
+- `/lawsuit dispatch`: Deploy the lawsuit interface
+  - Requires Judge role
+  - Creates lawsuit filing buttons
+  - Establishes chat thread for discussions
+
+- `/lawsuit role`: Manage user roles within a case
+  - `action` (choice): ASSIGN/REVOKE
+  - `role` (choice): Available case roles
+  - `user` (user): Target user
+  - Requires Judge role in the case
+
+### Context Menus
+
+- Message Context Menu:
+  - **Message in Lawsuit**: Manage messages (pin/delete)
+  - Available in case threads only
+  - Requires Judge role
+
+- User Context Menu:
+  - **User in Lawsuit**: Manage user permissions (mute/unmute)
+  - Available in case threads only
+  - Requires Judge role
+
+### Interactive Components
+
+- File Lawsuit button
+- File Appeal button
+- Evidence approval/rejection buttons
+- Trial visibility controls
+- Case management actions (dismiss/accept/withdraw)
+
+## Configuration
+
+### Required IDs
+
 ```python
-from . import xxx # xxx是内部模块的名字
+GUILD_ID: int             # Server ID
+JUDGE_ROLE_ID: int        # Role ID for judges
+PLAINTIFF_ROLE_ID: int    # Role ID for plaintiffs
+COURTROOM_CHANNEL_ID: int # Main channel for proceedings
+LOG_CHANNEL_ID: int       # Channel for logging
+LOG_FORUM_ID: int         # Forum for case archives
+LOG_POST_ID: int          # Post for case updates
 ```
-- 只能读写模块本地的文件。如果要读写本地文件，路径为`f"{os.path.dirname{__file__}/<文件名>"`.
-- 在[`requirements.txt`](requirements.txt)中写入模块所需的第三方库。
-- 在[`CHANGELOG`](CHANGELOG)中更新改动。
-- 在机器人内核文件夹以外的文件访问会被拒绝。
-- 外部程序执行会被拒绝。
 
-# Discord-Bot-Framework-Module-Template
-This is the module template for [Discord-Bot-Framework-Kernel](https://github.com/retr0-init/Discord-Bot-Framework-Kernel.git). The development refers to [interactions.py](https://interactions-py.github.io/interactions.py/).
+### System Limits
 
-## Things to consider for development
-- The module's entry point is in [`main.py`](main.py).
-- Do all the main work in the class inherited from `interactions.Extension`.
-- It's better to define your commands under either a command base or group.
-- The command name CANNOT be:
-    - Uppercase.
-    - Containing special characters other than underscore (`_`).
-    - Containing space.
-- You can use another `.py` file for internal module under the same directory as `main.py`. Be aware that you need to import it like
 ```python
-from . import xxx # xxx is the internal module script name
+MAX_JUDGES_PER_LAWSUIT: int = 1
+MAX_JUDGES_PER_APPEAL: int = 3
+MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB
 ```
-- Only local files in the module directory can be read/written. THe path to the file is `f"{os.path.dirname{__file__}/<filename>` to interact with local files.
-- Put python module requirements in [`requirements.txt`](requirements.txt). Do NOT delete this file.
-- Update your changes in [`CHANGELOG`](CHANGELOG).
-- The file access to the files other than the kernel directory will be denied.
-- The external program execution will be denied.
+
+### Supported File Types
+
+```python
+ALLOWED_MIME_TYPES: Set[str] = {
+    "image/jpeg",
+    "image/png",
+    "application/pdf",
+    "text/plain"
+}
+```
