@@ -126,10 +126,10 @@ class MessageAction(StrEnum):
 class CaseAction(StrEnum):
     FILE = auto()
     CLOSE = auto()
+    ACCEPT = auto()
     WITHDRAW = auto()
     REGISTER = auto()
     DISMISS = auto()
-    OPEN = auto()
 
 
 @dataclass
@@ -327,7 +327,11 @@ class Store:
                 data[case_id] = serializable
                 await f.seek(0)
                 await f.truncate()
-                await f.write(orjson.dumps(data).decode())
+                await f.write(
+                    orjson.dumps(
+                        data, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
+                    ).decode()
+                )
         except Exception as e:
             self.store_cache.pop(case_id, None)
             logger.exception("Failed to persist case %s: %s", case_id, e)
@@ -340,7 +344,11 @@ class Store:
                 data.pop(case_id, None)
                 await f.seek(0)
                 await f.truncate()
-                await f.write(orjson.dumps(data).decode())
+                await f.write(
+                    orjson.dumps(
+                        data, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
+                    ).decode()
+                )
             self.store_cache.pop(case_id, None)
         except Exception as e:
             logger.exception("Failed to remove case %s: %s", case_id, e)
@@ -702,19 +710,11 @@ class Lawsuit(interactions.Extension):
 
         self.case_action_handlers: Dict[CaseAction, Callable[..., Awaitable[None]]] = {
             CaseAction.FILE: self.handle_file_case_request,
-            CaseAction.REGISTER: self.handle_accept_case_request,
+            CaseAction.REGISTER: self.handle_register_case_request,
+            CaseAction.ACCEPT: self.handle_accept_case_request,
+            CaseAction.DISMISS: self.handle_dismiss_case_request,
+            CaseAction.WITHDRAW: self.handle_withdraw_case_request,
         }
-
-        for closure_action in (
-            CaseAction.WITHDRAW,
-            CaseAction.CLOSE,
-            CaseAction.DISMISS,
-        ):
-            self.case_action_handlers[closure_action] = (
-                lambda ctx, case_id, case, member, action=closure_action: self.handle_case_closure(
-                    ctx, case_id, case, member, action
-                )
-            )
 
         self.ext_initialized: bool = False
         self.ext_tasks: List[asyncio.Task[Any]] = []
@@ -906,30 +906,34 @@ class Lawsuit(interactions.Extension):
             logger.exception("Lawsuit submission failed")
             await self.view.send_error(ctx, "An error occurred.")
 
-    @interactions.component_callback(re.compile(r"dismiss_\d+"))
+    @interactions.component_callback(re.compile(r"dismiss_[a-zA-Z0-9]+"))
     async def handle_dismiss(self, ctx: interactions.ComponentContext) -> None:
         await self.process_case_action(ctx, CaseAction.DISMISS, ctx.custom_id[8:])
 
-    @interactions.component_callback(re.compile(r"accept_\d+"))
+    @interactions.component_callback(re.compile(r"accept_[a-zA-Z0-9]+"))
     async def handle_accept(self, ctx: interactions.ComponentContext) -> None:
-        await self.process_case_action(ctx, CaseAction.REGISTER, ctx.custom_id[7:])
+        await self.process_case_action(ctx, CaseAction.ACCEPT, ctx.custom_id[7:])
 
-    @interactions.component_callback(re.compile(r"withdraw_\d+"))
+    @interactions.component_callback(re.compile(r"register_[a-zA-Z0-9]+"))
+    async def handle_register(self, ctx: interactions.ComponentContext) -> None:
+        await self.process_case_action(ctx, CaseAction.REGISTER, ctx.custom_id[9:])
+
+    @interactions.component_callback(re.compile(r"withdraw_[a-zA-Z0-9]+"))
     async def handle_withdraw(self, ctx: interactions.ComponentContext) -> None:
         await self.process_case_action(ctx, CaseAction.WITHDRAW, ctx.custom_id[9:])
 
-    @interactions.component_callback(re.compile(r"public_trial_(yes|no)_\d+"))
+    @interactions.component_callback(re.compile(r"public_trial_(yes|no)_[a-zA-Z0-9]+"))
     async def handle_trial_privacy(self, ctx: interactions.ComponentContext) -> None:
-        if match := re.match(r"public_trial_(yes|no)_(\d+)", ctx.custom_id):
+        if match := re.match(r"public_trial_(yes|no)_([a-zA-Z0-9]+)", ctx.custom_id):
             is_public, case_id = match.groups()
             if case := await self.repo.get_case(case_id):
                 await self.create_trial_thread(ctx, case_id, case, is_public == "yes")
         else:
             await self.view.send_error(ctx, "Invalid trial privacy action.")
 
-    @interactions.component_callback(re.compile(r"(mute|unmute)_\d+"))
+    @interactions.component_callback(re.compile(r"(mute|unmute)_[a-zA-Z0-9]+"))
     async def handle_user_mute(self, ctx: interactions.ComponentContext) -> None:
-        if match := re.match(r"(mute|unmute)_(\d+)", ctx.custom_id):
+        if match := re.match(r"(mute|unmute)_([a-zA-Z0-9]+)", ctx.custom_id):
             action, user_id = match.groups()
             if case_id := await self.validate_user_permissions(ctx.author.id, user_id):
                 await self.process_mute_action(
@@ -940,9 +944,9 @@ class Lawsuit(interactions.Extension):
         else:
             await self.view.send_error(ctx, "Invalid mute action.")
 
-    @interactions.component_callback(re.compile(r"(pin|delete)_\d+"))
+    @interactions.component_callback(re.compile(r"(pin|delete)_[a-zA-Z0-9]+"))
     async def handle_message_action(self, ctx: interactions.ComponentContext) -> None:
-        if match := re.match(r"(pin|delete)_(\d+)", ctx.custom_id):
+        if match := re.match(r"(pin|delete)_([a-zA-Z0-9]+)", ctx.custom_id):
             action, message_id = match.groups()
             if case_id := await self.validate_user_permissions(
                 ctx.author.id, message_id
@@ -955,9 +959,13 @@ class Lawsuit(interactions.Extension):
         else:
             await self.view.send_error(ctx, "Invalid message action.")
 
-    @interactions.component_callback(re.compile(r"(approve|reject)_evidence_\d+_\d+"))
+    @interactions.component_callback(
+        re.compile(r"(approve|reject)_evidence_[a-zA-Z0-9]+_[a-zA-Z0-9]+")
+    )
     async def handle_evidence_action(self, ctx: interactions.ComponentContext) -> None:
-        if match := re.match(r"(approve|reject)_evidence_(\d+)_(\d+)", ctx.custom_id):
+        if match := re.match(
+            r"(approve|reject)_evidence_([a-zA-Z0-9]+)_([a-zA-Z0-9]+)", ctx.custom_id
+        ):
             action, case_id, user_id = match.groups()
             await self.process_evidence_decision(
                 ctx,
@@ -972,7 +980,7 @@ class Lawsuit(interactions.Extension):
         else:
             await self.view.send_error(ctx, "Invalid evidence action.")
 
-    @interactions.component_callback(re.compile(r"end_trial_\d+"))
+    @interactions.component_callback(re.compile(r"end_trial_[a-zA-Z0-9]+"))
     async def handle_end_trial(self, ctx: interactions.ComponentContext) -> None:
         await self.process_case_action(ctx, CaseAction.CLOSE, ctx.custom_id[10:])
 
@@ -1209,6 +1217,9 @@ class Lawsuit(interactions.Extension):
         except asyncio.TimeoutError:
             await self.view.send_error(ctx, "Operation timed out. Please try again.")
         except Exception as e:
+            logger.exception(
+                f"Unexpected error in process_case_action: {type(e).__name__}"
+            )
             await self.view.send_error(
                 ctx, f"An unexpected error occurred: {type(e).__name__}"
             )
@@ -1241,58 +1252,163 @@ class Lawsuit(interactions.Extension):
             if not await self.user_has_permission_for_closure(
                 ctx.author.id, case_id, member
             ):
-                return await self.view.send_error(ctx, "Insufficient permissions.")
+                await ctx.send("Insufficient permissions.", ephemeral=True)
+                return
+
+            await ctx.defer(ephemeral=True)
 
             action_name = action.value.capitalize()
-            case_status = CaseStatus(action.value)
+            setattr(case, "status", CaseStatus.CLOSED)
 
-            setattr(case, "status", case_status)
             thread_ids = {
                 tid
-                for tid in (
-                    getattr(case, "med_thread_id", None),
-                    getattr(case, "trial_thread_id", None),
-                )
-                if tid
+                for tid in (case.med_thread_id, case.trial_thread_id)
+                if tid is not None
             }
 
-            for tid in thread_ids:
-                await self.archive_thread(tid)
+            await asyncio.gather(
+                *(self.archive_thread(tid) for tid in thread_ids),
+                return_exceptions=True,
+            )
 
             notification = f"Case number {case_id} has been {action_name} by {ctx.author.display_name}."
+
+            await ctx.send(
+                embed=await self.view.create_embed(
+                    "Success",
+                    f"Case number {case_id} successfully {action_name}.",
+                ),
+                ephemeral=True,
+            )
+
             await self.notify_participants(case_id, notification)
             await self.enqueue_case_file_save(case_id, case)
-            await self.view.send_success(
-                ctx, f"Case number {case_id} successfully {action_name}."
+
+        except Exception as e:
+            logger.exception(f"Failed to close the case: {type(e).__name__}")
+            if not ctx.deferred:
+                await ctx.send(
+                    f"Failed to close the case: {type(e).__name__}", ephemeral=True
+                )
+
+    async def handle_dismiss_case_request(
+        self,
+        ctx: interactions.ComponentContext,
+        case_id: str,
+        case: Data,
+        member: interactions.Member,
+    ) -> None:
+        try:
+            if not await self.user_has_judge_role(member):
+                return await self.view.send_error(ctx, "Only judges can dismiss cases.")
+
+            if case.status == CaseStatus.CLOSED:
+                return await self.view.send_error(ctx, "This case is already closed.")
+
+            await self.handle_case_closure(
+                ctx, case_id, case, member, CaseAction.DISMISS
             )
 
         except Exception as e:
-            await self.view.send_error(
-                ctx, f"Failed to close the case: {type(e).__name__}"
+            logger.exception(f"Failed to dismiss case: {e}")
+            await self.view.send_error(ctx, "Failed to dismiss case.")
+
+    async def handle_withdraw_case_request(
+        self,
+        ctx: interactions.ComponentContext,
+        case_id: str,
+        case: Data,
+        member: interactions.Member,
+    ) -> None:
+        try:
+            if ctx.author.id != case.plaintiff_id:
+                return await self.view.send_error(
+                    ctx, "Only the plaintiff can withdraw a case."
+                )
+
+            if case.status == CaseStatus.CLOSED:
+                return await self.view.send_error(ctx, "This case is already closed.")
+
+            await self.handle_case_closure(
+                ctx, case_id, case, member, CaseAction.WITHDRAW
             )
-            raise
+
+        except Exception as e:
+            logger.exception(f"Failed to withdraw case: {e}")
+            await self.view.send_error(ctx, "Failed to withdraw case.")
 
     async def handle_accept_case_request(
         self,
         ctx: interactions.ComponentContext,
         case_id: str,
+        case: Data,
+        member: interactions.Member,
     ) -> None:
         try:
-            async with asyncio.timeout(5.0):
-                if not await self.is_user_assigned_to_case(
-                    ctx.author.id, case_id, "judges"
-                ):
-                    return await self.view.send_error(ctx, "Insufficient permissions.")
+            if not await self.user_has_judge_role(member):
+                await ctx.send("Only judges can accept cases.", ephemeral=True)
+                return
 
-                embed = await self.view.create_embed(title="Public or Private Trial")
-                buttons = await self.view.create_trial_visibility_buttons(case_id)
-                await ctx.send(
-                    embeds=[embed],
-                    components=[interactions.ActionRow(*buttons)],
-                    allowed_mentions=interactions.AllowedMentions.none(),
+            if case.status != CaseStatus.FILED:
+                await ctx.send("This case cannot be accepted.", ephemeral=True)
+                return
+
+            case.status = CaseStatus.IN_PROGRESS
+            await self.repo.update_case(case_id, status=case.status)
+
+            await ctx.defer(ephemeral=True)
+
+            embed = await self.view.create_embed(title="Public or Private Trial")
+            buttons = await self.view.create_trial_visibility_buttons(case_id)
+
+            await ctx.send(
+                embeds=[embed],
+                components=[interactions.ActionRow(*buttons)],
+                ephemeral=True,
+            )
+
+        except Exception as e:
+            logger.exception(f"Failed to accept case: {e}")
+            if not ctx.deferred:
+                await ctx.send("Failed to accept case.", ephemeral=True)
+
+    async def handle_register_case_request(
+        self,
+        ctx: interactions.ComponentContext,
+        case_id: str,
+        case: Data,
+        member: interactions.Member,
+    ) -> None:
+        try:
+            if not await self.user_has_judge_role(member):
+                return await self.view.send_error(
+                    ctx, "Only judges can register for cases."
                 )
-        except Exception:
-            await self.view.send_error(ctx, "Failed to process request.")
+
+            if len(case.judges) >= self.config.MAX_JUDGES_PER_LAWSUIT:
+                return await self.view.send_error(
+                    ctx, "Maximum number of judges reached."
+                )
+
+            if ctx.author.id in case.judges:
+                return await self.view.send_error(
+                    ctx, "You are already registered as a judge."
+                )
+
+            case.judges.add(ctx.author.id)
+            await self.repo.update_case(case_id, judges=case.judges)
+
+            notification = (
+                f"{ctx.author.display_name} has joined as a judge for Case #{case_id}."
+            )
+            await self.notify_participants(case_id, notification)
+            await self.view.send_success(
+                ctx, f"Successfully registered as judge for Case #{case_id}."
+            )
+
+        except Exception as e:
+            logger.exception(f"Failed to register judge: {e}")
+            await self.view.send_error(ctx, "Failed to register as judge.")
 
     async def end_trial(self, ctx: interactions.ComponentContext) -> None:
         try:
@@ -1547,22 +1663,20 @@ class Lawsuit(interactions.Extension):
             return
         await asyncio.gather(*(notify_func(uid) for uid in user_ids))
 
-    async def send_dm(self, user_id: int, **kwargs: Any) -> None:
+    async def send_dm(self, user_id: int, **kwargs) -> None:
         try:
-            async with asyncio.timeout(5.0):
-                await (await self.bot.fetch_user(user_id)).send(**kwargs)
-                logger.debug("Direct message delivered", extra={"user_id": user_id})
+            user = await self.bot.fetch_user(user_id)
+            await user.send(**kwargs)
+            logger.debug("Direct message delivered")
+        except HTTPException as e:
+            if "Cannot send messages to this user" in str(e):
+                logger.warning(
+                    f"Unable to send DM to user {user_id}: User has DMs disabled"
+                )
+            else:
+                logger.warning(f"Direct message delivery failed: {e}")
         except Exception as e:
-            logger.log(
-                (
-                    logging.WARNING
-                    if isinstance(e, (asyncio.TimeoutError, HTTPException))
-                    else logging.ERROR
-                ),
-                "Direct message delivery failed",
-                extra={"user_id": user_id},
-                exc_info=True,
-            )
+            logger.warning(f"Direct message delivery failed: {e}")
 
     # Role
 
@@ -1914,16 +2028,27 @@ class Lawsuit(interactions.Extension):
 
     # Helper
 
-    async def archive_thread(self, med_thread_id: int) -> bool:
+    async def archive_thread(self, thread_id: int) -> bool:
         try:
-            if thread := await self.bot.fetch_channel(med_thread_id):
-                return isinstance(
-                    thread, interactions.ThreadChannel
-                ) and await thread.edit(archived=True, locked=True)
+            if thread := await self.bot.fetch_channel(thread_id):
+                if isinstance(thread, interactions.ThreadChannel):
+                    if thread.archived:
+                        try:
+                            await thread.edit(archived=False)
+                        except Forbidden:
+                            logger.warning(
+                                "Unable to unarchive thread before archiving",
+                                extra={"thread_id": thread_id},
+                            )
+                            return False
+
+                    result = await thread.edit(archived=True, locked=True)
+                    return bool(result)
             return False
-        except Exception:
+        except Exception as e:
             logger.exception(
-                "Failed to archive thread", extra={"med_thread_id": med_thread_id}
+                f"Failed to archive thread: {type(e).__name__}",
+                extra={"thread_id": thread_id},
             )
             return False
 
@@ -2036,7 +2161,10 @@ class Lawsuit(interactions.Extension):
 
     @staticmethod
     def create_case_id(length: int = 6) -> str:
-        return secrets.token_urlsafe(length // 2)[:length]
+        return (
+            f"{int(time.time() * 1000):x}"[-length + 3 :]
+            + f"{random.randrange(1000):03}"
+        )
 
     async def create_new_case(
         self, ctx: interactions.ModalContext, data: Dict[str, str], defendant_id: int
