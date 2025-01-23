@@ -58,7 +58,7 @@ logger.addHandler(file_handler)
 
 class Config:
     GUILD_ID: int = 1150630510696075404
-    JUDGE_ROLE_ID: int = 1200100104682614884
+    JUDGE_ROLE_ID: int = 1327208667568799766
     PLAINTIFF_ROLE_ID: int = 1200043628899356702
     COURTROOM_CHANNEL_ID: int = 1247290032881008701
     LOG_CHANNEL_ID: int = 1166627731916734504
@@ -214,14 +214,14 @@ class Store:
     def __init__(self) -> None:
         self.db_path = os.path.join(BASE_DIR, "cases.json")
         self.store_initialized = False
-        self.store_initialization_lock = asyncio.Lock()
-        self.data_cache = cachetools.TTLCache(maxsize=1000, ttl=3600)
+        self.store_lock = asyncio.Lock()
+        self.store_cache = cachetools.TTLCache(maxsize=1000, ttl=3600)
 
     async def initialize_store(self) -> None:
         if self.store_initialized:
             return
 
-        async with self.store_initialization_lock:
+        async with self.store_lock:
             if not self.store_initialized:
                 try:
                     await asyncio.to_thread(
@@ -238,41 +238,98 @@ class Store:
                     ) from e
 
     async def read_all(self) -> Dict[str, Dict[str, Any]]:
-        if data := self.data_cache:
+        if data := self.store_cache:
             return dict(data)
         try:
             async with aiofiles.open(self.db_path) as f:
                 data = orjson.loads(await f.read())
-                self.data_cache.update(data)
+                self.store_cache.update(data)
                 return data
         except Exception as e:
             logger.exception("Failed to read case data: %s", e)
             return {}
 
     async def read_case(self, case_id: str) -> Optional[Dict[str, Any]]:
-        if case_data := self.data_cache.get(case_id):
+        if case_data := self.store_cache.get(case_id):
             return case_data
         try:
             async with aiofiles.open(self.db_path) as f:
-                data = orjson.loads(await f.read())
-                if case_data := data.get(case_id):
-                    self.data_cache[case_id] = case_data
-                    return case_data
+                if case_data := orjson.loads(await f.read()).get(case_id):
+                    deserialized = self.deserialize_data(case_data)
+                    self.store_cache[case_id] = deserialized
+                    return deserialized
         except Exception as e:
             logger.exception("Failed to retrieve case %s: %s", case_id, e)
         return None
 
+    def prepare_for_serialization(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            k: (
+                sorted(v)
+                if isinstance(v, set)
+                else (
+                    self.prepare_for_serialization(v)
+                    if isinstance(v, dict)
+                    else (
+                        [
+                            (
+                                self.prepare_for_serialization(i)
+                                if isinstance(i, dict)
+                                else list(i) if isinstance(i, set) else i
+                            )
+                            for i in v
+                        ]
+                        if isinstance(v, (list, tuple))
+                        else v
+                    )
+                )
+            )
+            for k, v in data.items()
+        }
+
+    def deserialize_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        set_keys = {"judges", "allowed_roles", "mute_list"}
+        return {
+            k: (
+                set(v)
+                if k in set_keys and isinstance(v, list)
+                else (
+                    self.deserialize_data(v)
+                    if isinstance(v, dict)
+                    else (
+                        [
+                            (
+                                self.deserialize_data(i)
+                                if isinstance(i, dict)
+                                else (
+                                    set(i)
+                                    if isinstance(i, list) and k == "roles"
+                                    else i
+                                )
+                            )
+                            for i in v
+                        ]
+                        if isinstance(v, list)
+                        else v
+                    )
+                )
+            )
+            for k, v in data.items()
+        }
+
     async def write_case(self, case_id: str, case_data: Dict[str, Any]) -> None:
-        self.data_cache[case_id] = case_data
+        serializable = self.prepare_for_serialization(case_data)
+        self.store_cache[case_id] = case_data
+
         try:
             async with aiofiles.open(self.db_path, mode="r+") as f:
                 data = orjson.loads(await f.read())
-                data[case_id] = case_data
+                data[case_id] = serializable
                 await f.seek(0)
                 await f.truncate()
                 await f.write(orjson.dumps(data).decode())
         except Exception as e:
-            self.data_cache.pop(case_id, None)
+            self.store_cache.pop(case_id, None)
             logger.exception("Failed to persist case %s: %s", case_id, e)
             raise
 
@@ -284,7 +341,7 @@ class Store:
                 await f.seek(0)
                 await f.truncate()
                 await f.write(orjson.dumps(data).decode())
-            self.data_cache.pop(case_id, None)
+            self.store_cache.pop(case_id, None)
         except Exception as e:
             logger.exception("Failed to remove case %s: %s", case_id, e)
             raise
@@ -293,23 +350,23 @@ class Store:
 class Repo:
     def __init__(self) -> None:
         self.store = Store()
-        self.cached_cases = cachetools.TTLCache(maxsize=1024, ttl=3600)
-        self.initialized = False
+        self.repo_cache = cachetools.TTLCache(maxsize=1024, ttl=3600)
+        self.repo_initialized = False
         self.cleanup_task: Optional[asyncio.Task[None]] = None
 
     async def initialize_repo(self) -> None:
-        if self.initialized:
+        if self.repo_initialized:
             return
         await self.store.initialize_store()
         self.cleanup_task = asyncio.create_task(self.clean_up())
-        self.initialized = True
+        self.repo_initialized = True
 
     async def clean_up(self) -> None:
         while True:
             try:
                 await asyncio.sleep(300)
-                self.cached_cases.expire()
-                self.store.data_cache.expire()
+                self.repo_cache.expire()
+                self.store.store_cache.expire()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -317,14 +374,14 @@ class Repo:
                 await asyncio.sleep(60)
 
     async def ensure_init(self) -> None:
-        if not self.initialized:
+        if not self.repo_initialized:
             await self.initialize_repo()
 
     async def get_case(self, case_id: str) -> Optional[Data]:
         await self.ensure_init()
-        return self.cached_cases.get(case_id) or await self._load_case(case_id)
+        return self.repo_cache.get(case_id) or await self.load_case(case_id)
 
-    async def _load_case(self, case_id: str) -> Optional[Data]:
+    async def load_case(self, case_id: str) -> Optional[Data]:
         raw_data = await self.store.read_case(case_id)
         if not raw_data:
             return None
@@ -348,7 +405,7 @@ class Repo:
                 raise TypeError(f"Incompatible data structure: {type(raw_data)}")
 
             case = Data(**dict(sorted(data_dict.items())))
-            self.cached_cases[case_id] = case
+            self.repo_cache[case_id] = case
             return case
         except Exception as e:
             logger.exception(f"Failed to validate case data: {e}")
@@ -357,7 +414,7 @@ class Repo:
     async def save_case(self, case_id: str, case: Data) -> None:
         await self.ensure_init()
         await self.store.write_case(case_id, case.__dict__)
-        self.cached_cases[case_id] = case
+        self.repo_cache[case_id] = case
 
     async def update_case(self, case_id: str, **kwargs: Any) -> Data:
         await self.ensure_init()
@@ -376,13 +433,13 @@ class Repo:
     async def delete_case(self, case_id: str) -> None:
         await self.ensure_init()
         await self.store.delete_case(case_id)
-        self.cached_cases.pop(case_id, None)
+        self.repo_cache.pop(case_id, None)
 
     async def get_all_cases(self) -> Dict[str, Data]:
         await self.ensure_init()
         raw_cases = await self.store.read_all()
         return {
-            case_id: self.cached_cases.setdefault(
+            case_id: self.repo_cache.setdefault(
                 case_id, Data(**dict(sorted(data.items())))
             )
             for case_id, data in raw_cases.items()
@@ -674,13 +731,19 @@ class Lawsuit(interactions.Extension):
                 self.restart_background_task(task)
 
     def restart_background_task(self, task: asyncio.Task[Any]) -> None:
-        task_name = task.get_name().lower()
-        if task_method := getattr(self, f"_{task_name}", None):
-            new_task = asyncio.create_task(task_method(), name=task.get_name())
+        task_name = task.get_name()
+        task_methods = {
+            "_fetch_cases": self.run_case_monitor,
+            "_daily_embed_update": self.run_embed_updater,
+            "_process_task_queue": self.run_task_processor,
+        }
+
+        if task_method := task_methods.get(task_name):
+            new_task = asyncio.create_task(task_method(), name=task_name)
             new_task.add_done_callback(self.handle_task_failure)
-            logger.info(f"Task {task.get_name()} restarted")
+            logger.info(f"Task {task_name} restarted")
         else:
-            logger.exception(f"Cannot restart task - method not found: {task_name}")
+            logger.error(f"Cannot restart task - method not found: {task_name}")
 
     async def run_case_monitor(self) -> None:
         while not self.shutdown_event.is_set():
@@ -697,19 +760,21 @@ class Lawsuit(interactions.Extension):
     async def run_task_processor(self) -> None:
         while not self.shutdown_event.is_set():
             try:
-                if task := await asyncio.wait_for(
-                    self.case_task_queue.get(), timeout=1.0
-                ):
-                    await asyncio.wait_for(
-                        asyncio.shield(
-                            asyncio.create_task(task(), name=f"task_{id(task)}")
-                        ),
-                        timeout=30.0,
-                    )
+                task = await asyncio.wait_for(self.case_task_queue.get(), timeout=1.0)
+                if task:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(
+                                asyncio.create_task(task(), name=f"task_{id(task)}")
+                            ),
+                            timeout=30.0,
+                        )
+                    finally:
+                        self.case_task_queue.task_done()
+            except asyncio.TimeoutError:
+                continue
             except Exception as e:
                 logger.exception(f"Task processing failed: {e}")
-            finally:
-                self.case_task_queue.task_done()
 
     async def run_embed_updater(self) -> None:
         while not self.shutdown_event.is_set():
@@ -990,7 +1055,7 @@ class Lawsuit(interactions.Extension):
         opt_type=interactions.OptionType.STRING,
         required=True,
         choices=[
-            interactions.SlashCommandChoice(name=a.name.title(), value=a.value)
+            interactions.SlashCommandChoice(name=a.name.title(), value=str(a.value))
             for a in RoleAction
         ],
     )
